@@ -1,0 +1,13 @@
+[package]
+name = "p2p_gossiping_app"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "1.20.1", features = ["default", "net", "sync"] }
+thiserror = "1.0.32"
+clap = { version = "4.4.1", features = ["derive"] }
+random_word = { version = "0.4.3", features = ["en"] }
+# crossbeam-queue = "0.3.11"
