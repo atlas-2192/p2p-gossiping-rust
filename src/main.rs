@@ -1,15 +1,22 @@
+use std::io;
+use std::time::Duration;
 use clap::Parser;
+use crate::peer::Peer;
 
 mod peer;
 mod sender;
 mod receiver;
+mod error;
+mod network;
 
-fn main() {
+#[tokio::main]
+async fn main() -> io::Result<()> {
     let args = Args::parse();
     let period =  args.period;
     let port = args.port;
     let connect = args.connect;
-    println!("My address is '127.0.0.1:{}'", &port);
+    Peer::new(port).start(Duration::from_secs(period), connect).await?;
+    Ok(())
 }
 
 /// Command line args
@@ -18,7 +25,7 @@ fn main() {
 struct Args {
     /// send a random gossip message to all the other peers every N seconds
     #[arg(long)]
-    period: u32,
+    period: u64,
     /// Port to start peer on
     #[arg(long)]
     port: u32,
