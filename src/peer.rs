@@ -23,8 +23,8 @@ pub(crate) struct Peer {
     state: State,
     port: u32,
     /// TcpListener accepting [`Peer`] connections
-    //listener: Option<Arc<Mutex<TcpListener>>>,
-    listener: Option<TcpListener>,
+    listener: Option<Arc<Mutex<TcpListener>>>,
+    //listener: Option<TcpListener>,
     /// to accept incoming connections
     receiver: Receiver,
     /// to send data to other peers
@@ -32,7 +32,7 @@ pub(crate) struct Peer {
     /// Peers which are required to be connected to this peer
     peers_to_connect: Arc<Mutex<HashSet<SocketAddr>>>,
     /// Peers which are currently connected to this peer
-    connected_peers: Vec<TcpStream>,
+    connected_peers: Arc<Mutex<Vec<TcpStream>>>,
 }
 
 /// States in which peer can be from start up until disconnection
@@ -41,10 +41,13 @@ enum State {
     /// Started, trying to establish connection with initial peer
     /// via --connect flag if is_only = true
     Started { is_only: bool, connect_to: Option<String> },
-    /// Waiting for incoming connections if the peer is alone
-    Waiting,
-    /// The peer has established connections with all available peers
-    Connected,
+    // /// Waiting for incoming connections if the peer is alone
+    // Waiting,
+    // /// The peer has established connections with all available peers
+    // Connected,
+    /// The peer is ready for processing incoming requests
+    /// and also sends messages to other peers
+    Running,
     /// The peer stopped and disconnected
     Disconnected,
 }
@@ -79,36 +82,68 @@ impl Peer {
     /// format `address:port`.
     #[allow(unused_doc_comments)]
     pub async fn run(&mut self, period: Duration) -> Result<(), Box<dyn std::error::Error + Send + Sync>> { //  -> RequestResult<()>
-        let addr = String::from(HOST) + &self.port.to_string();
+        let addr = String::from(HOST) + ":" + &self.port.to_string();
         info!("My address is : {}", &addr);
         loop {
-            let state = &self.state.clone();
-            match state {
+            //debug!("peer state: {:?}", &self.state);
+            match &self.state {
                 /// Peer can start as the first peer, or it can try to connect initial peer
                 State::Started { is_only, connect_to } => {
-                    let started = Self::handle_started(self, *is_only, connect_to, &addr).await;
-                    if let Ok(_) = started {
+                    if *is_only {
+                        let listener = TcpListener::bind(&addr).await;
+                        if let Err(ref err) = listener {
+                            error!("Could not bind TcpListener: {err}");
+                            self.state = State::Disconnected;
+                            // TODO maybe I should return error?
+                            return Ok(())
+                        }
+                        //self.listener = Some(listener.unwrap());
+                        self.listener = Some(Arc::new(Mutex::new(listener.unwrap())));
+                        Self::start_listen_incoming(self).await;
+                        self.state = State::Running;
+                        debug!("handle_started State::Running");
                         continue
                     } else {
-                        let err = started.err().unwrap();
-                        error!("Error: {}", err);
-                        return Err(err)
+                        let listener = TcpListener::bind(&addr).await;
+                        if let Err(ref err) = listener {
+                            error!("Could not bind TcpListener: {err}");
+                            self.state = State::Disconnected;
+                            continue
+                        }
+                        //self.listener = Some(listener.unwrap());
+                        self.listener = Some(Arc::new(Mutex::new(listener.unwrap())));
+                        Self::start_listen_incoming(self).await;
+                        // connect to initial peer and get all peers
+                        let connect_to = String::from(HOST) + ":" + connect_to.as_ref().unwrap();
+                        let mut peer_conn = try_connect(connect_to).await?;
+                        let peers_to_connect = request_peers(&mut peer_conn).await?;
+                        // connection with initial peer is already established
+                        let mut connected_peers = self.connected_peers.lock().await;
+                        connected_peers.push(peer_conn);
+                        // try to establish connection with all known peers
+                        let mut output = String::from("[\"");
+                        for p in peers_to_connect.iter() {
+                            let peer_conn = try_connect(p).await;
+                            if let Ok(peer_conn) = peer_conn {
+                                output = output + &peer_conn.peer_addr().unwrap().to_string() + "\"";
+                                connected_peers.push(peer_conn);
+                            } else {
+                                error!("Could not connect to peer : {:?}", peer_conn.err().unwrap());
+                            }
+                        }
+                        output = output + "]";
+                        info!("Connected to the peers at {}", output);
+                        self.state = State::Running;
+                        continue
                     }
                 }
-                /// Waiting for incoming connections
-                State::Waiting => {
-
-                    // match self.listener.as_ref().unwrap().accept().await {
-                    //     Ok((socket, addr)) => {
-                    //         info!("new client: {:?}", addr);
-                    //
-                    //         self.state = State::Connected;
-                    //         continue;
-                    //     },
-                    //     Err(e) => info!("couldn't get client: {:?}", e),
-                    // }
+                /// Processing incoming connections
+                /// has already been launched in [`Self::start_listen_incoming()`]
+                /// Here we are sending messages only
+                /// TODO DANGER - impossible to quit this state!
+                State::Running => {
+                    Self::start_send_outcoming(&self, period).await;
                 }
-                State::Connected => {}
                 /// Sending messages to other peers that this
                 /// peer has been disconnected (to avoid excessive requests)
                 State::Disconnected => {
@@ -121,83 +156,55 @@ impl Peer {
         Ok(())
     }
 
-    async fn start_listen_connections(&self) {
-        //-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        //let listener = listener.clone();
-        let listener = Arc::new(Mutex::new(&self.listener));
-        let peers = self.peers_to_connect.clone();
-
-        loop {
-            let peers = peers.clone();
-            let listener = listener.lock().await;
-            if let Ok((socket, addr)) = listener.as_ref().unwrap().accept().await {
-                let socket = Arc::new(Mutex::new(socket));
-                tokio::spawn(async move {
-                    debug!("process incoming connection : {addr}");
-                    let mut socket = socket.lock().await;
-                    let processed = Self::process_incoming(peers, &mut socket).await;
-                    debug!("process_incoming: {:?}", processed);
-                });
+    /// Send message to peer with specified [`period`] time interval
+    async fn start_send_outcoming(&self, period: Duration) {
+        let peers = &self.connected_peers;
+        let peers = peers.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(period).await;
+                let mut peers = peers.lock().await;
+                // TODO join msg Sending message [random message] to ["127.0.0.1:8080", "127.0.0.1:8081"]
+                // Peers which haven't respond we consider unavailable
+                let mut unavailable_peers = vec![];
+                for (i, peer) in peers.iter_mut().enumerate() {
+                    let msg = gen_rnd_msg();
+                    let sent = write_msg(peer, &msg).await;
+                    if let Ok(_) = sent {
+                        info!("Sending message {msg} to [{}]", peer.peer_addr().unwrap());
+                    } else {
+                        error!("could not send message {msg} to [{}], error : {}",
+                            peer.peer_addr().unwrap(),
+                            sent.err().unwrap()
+                        );
+                        unavailable_peers.push(i);
+                    }
+                }
+                unavailable_peers.into_iter().for_each(|p| { peers.remove(p); });
             }
-        }
+        });
     }
 
-    async fn handle_started(&mut self, is_only: bool, connect_to: &Option<String>, addr: &str)
-        -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        return if is_only {
-            self.state = State::Waiting;
-            let listener = TcpListener::bind(addr).await;
-            if let Err(ref err) = listener {
-                error!("Error: {err}");
-                self.state = State::Disconnected;
-                // TODO maybe I should return error?
-                return Ok(())
-            }
-            //let listener = listener.unwrap();
-            //self.listener = Some(Arc::new(Mutex::new(listener)));
-            self.listener = Some(listener.unwrap());
-            Self::start_listen_connections(self).await;
-            self.state = State::Waiting;
-            Ok(())
-        } else {
-            let listener = TcpListener::bind(addr).await;
-            if let Err(ref err) = listener {
-                error!("Error: {err}");
-                self.state = State::Disconnected;
-                return Ok(())
-            }
-            // let listener = listener.unwrap();
-            // self.listener = Some(Arc::new(Mutex::new(listener)));
-            self.listener = Some(listener.unwrap());
-            Self::start_listen_connections(self).await;
-            // connect to initial peer and get all peers
-            let mut peer_conn = try_connect(connect_to.as_ref().unwrap()).await?;
-            let peers_to_connect = request_peers(&mut peer_conn).await?;
-            // connection with initial peer is already established
-            self.connected_peers.push(peer_conn);
-            // try to establish connection with all known peers
-            let mut output = String::from("[\"");
-            for p in peers_to_connect.iter() {
-                let peer_conn = try_connect(p).await;
-                if let Ok(peer_conn) = peer_conn {
-                    output = output + &peer_conn.peer_addr().unwrap().to_string() + "\"";
-                    self.connected_peers.push(peer_conn);
-                } else {
-                    error!("Could not connect to peer : {:?}", peer_conn.err().unwrap());
+    async fn start_listen_incoming(&self) {
+        //-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let listener = self.listener.as_ref().unwrap().clone();
+        let peers = self.peers_to_connect.clone();
+        tokio::spawn(async move {
+            loop {
+                let peers = peers.clone();
+                let listener = listener.lock().await;
+                if let Ok((socket, addr)) = listener.accept().await {
+                    let socket = Arc::new(Mutex::new(socket));
+                    tokio::spawn(async move {
+                        debug!("process incoming connection : {addr}");
+                        let mut socket = socket.lock().await;
+                        let processed = Self::process_incoming(peers, &mut socket).await;
+                        debug!("process_incoming: {:?}", processed);
+                    });
                 }
             }
-            output = output + "]";
-            info!("Connected to the peers at {}", output);
-            self.state = State::Connected;
-
-            Ok(())
-        }
+        });
     }
-
-    /// Send message to peer with specified [`period`] time interval
-    // async fn send_message_to_peer(&self, period: Duration) -> RequestResult<()> {
-    //
-    // }
 
     async fn process_incoming(
         peers_to_connect: Arc<Mutex<HashSet<SocketAddr>>>,
@@ -379,3 +386,63 @@ fn gen_rnd_msg() -> String {
 //         }
 //         Ok(())
 //     }
+
+
+//                    // let started = Self::handle_started(self, *is_only, connect_to, &addr).await;
+//                     // if let Ok(_) = started {
+//                     //     continue
+//                     // } else {
+//                     //     let err = started.err().unwrap();
+//                     //     error!("Error: {}", err);
+//                     //     return Err(err)
+//                     // }
+// async fn handle_started(&mut self, is_only: bool, connect_to: &Option<String>, addr: &str)
+//     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+//     return if is_only {
+//         let listener = TcpListener::bind(addr).await;
+//         if let Err(ref err) = listener {
+//             error!("Could not bind TcpListener: {err}");
+//             self.state = State::Disconnected;
+//             // TODO maybe I should return error?
+//             return Ok(())
+//         }
+//         //self.listener = Some(listener.unwrap());
+//         self.listener = Some(Arc::new(Mutex::new(listener.unwrap())));
+//         Self::start_listen_incoming(self).await;
+//         self.state = State::Running;
+//         debug!("handle_started State::Running");
+//         Ok(())
+//     } else {
+//         let listener = TcpListener::bind(addr).await;
+//         if let Err(ref err) = listener {
+//             error!("Could not bind TcpListener: {err}");
+//             self.state = State::Disconnected;
+//             return Ok(())
+//         }
+//         //self.listener = Some(listener.unwrap());
+//         self.listener = Some(Arc::new(Mutex::new(listener.unwrap())));
+//         Self::start_listen_incoming(self).await;
+//         // connect to initial peer and get all peers
+//         let connect_to = String::from(HOST) + ":" + connect_to.as_ref().unwrap();
+//         let mut peer_conn = try_connect(connect_to).await?;
+//         let peers_to_connect = request_peers(&mut peer_conn).await?;
+//         // connection with initial peer is already established
+//         let mut connected_peers = self.connected_peers.lock().await;
+//         connected_peers.push(peer_conn);
+//         // try to establish connection with all known peers
+//         let mut output = String::from("[\"");
+//         for p in peers_to_connect.iter() {
+//             let peer_conn = try_connect(p).await;
+//             if let Ok(peer_conn) = peer_conn {
+//                 output = output + &peer_conn.peer_addr().unwrap().to_string() + "\"";
+//                 connected_peers.push(peer_conn);
+//             } else {
+//                 error!("Could not connect to peer : {:?}", peer_conn.err().unwrap());
+//             }
+//         }
+//         output = output + "]";
+//         info!("Connected to the peers at {}", output);
+//         self.state = State::Running;
+//         Ok(())
+//     }
+// }

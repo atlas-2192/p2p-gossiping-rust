@@ -1,6 +1,7 @@
 use std::io;
 use std::time::Duration;
 use clap::Parser;
+use tracing::Level;
 use crate::peer::Peer;
 
 mod peer;
@@ -11,7 +12,8 @@ mod network;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    tracing_subscriber::fmt::init();
+    let subscriber = tracing_subscriber::fmt().with_max_level(Level::DEBUG).finish();
+    tracing::subscriber::set_global_default(subscriber).expect("Could not set tracing subscriber");
     let args = Args::parse();
     let period =  args.period;
     let port = args.port;

@@ -155,9 +155,9 @@ pub(crate) async fn read_exact_async(s: &TcpStream, buf: &mut [u8]) -> io::Resul
 async fn try_handshake(mut stream: TcpStream) -> ConnectResult<TcpStream> {
     write_all_async(&mut stream, b"req").await?;
     let mut buf = [0; 4];
-    write_all_async(&mut stream, &mut buf).await?;
+    read_exact_async(&mut stream, &mut buf).await?;
     if &buf != b"resp" {
-        let msg = format!("received: {:?}", buf);
+        let msg = format!("try_handshake() received: {:?}", buf);
         return Err(ConnectError::BadHandshake(msg));
     }
     Ok(stream)
@@ -167,7 +167,7 @@ async fn accept_handshake(stream: TcpStream) -> ConnectResult<TcpStream> {
     let mut buf = [0; 3];
     read_exact_async(&stream, &mut buf).await?;
     if &buf != b"req" {
-        let msg = format!("received: {:?}", buf);
+        let msg = format!("accept_handshake() received: {:?}", buf);
         return Err(ConnectError::BadHandshake(msg));
     }
     write_all_async(&stream, b"resp").await?;
