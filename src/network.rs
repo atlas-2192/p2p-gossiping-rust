@@ -22,7 +22,7 @@ impl TryFrom<u8> for Message {
             0u8 => Ok(Message::Gossiping),
             1u8 => Ok(Message::PeersRequest),
             // _ => Err(RequestError::Recv(WrongCommand))
-            _ => Err(Error::new(ErrorKind::Other, "oh no!"))
+            _ => Err(Error::new(ErrorKind::Other, "oh no try_from!"))
         }
     }
 }
@@ -63,8 +63,13 @@ pub(crate) async fn request_peers(socket: &mut TcpStream) -> io::Result<HashSet<
     let len = u32::from_be_bytes(len_buf);
     let mut data_buf = vec![0; len as _];
     read_exact_async(socket, &mut data_buf).await?;
-    let peers = deserialize_data(&data_buf)?;
-    Ok(peers)
+    // let peers = deserialize_data(&data_buf)?;
+    if let Ok(peers) = deserialize_data(&data_buf) {
+        return Ok(peers)
+    } else {
+        return Err(Error::new(ErrorKind::Other, "oh no request_peers!"))
+    }
+
 }
 
 /// Intended to be used after ['network::try_connect()']

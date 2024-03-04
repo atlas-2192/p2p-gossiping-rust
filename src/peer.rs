@@ -5,7 +5,8 @@ use std::fmt::{Display, Formatter};
 use std::io::{Bytes, Error, ErrorKind};
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
+use tokio::sync::Mutex;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io;
@@ -22,13 +23,14 @@ pub(crate) struct Peer {
     state: State,
     port: u32,
     /// TcpListener accepting [`Peer`] connections
-    listener: Option<Arc<Mutex<TcpListener>>>,
+    //listener: Option<Arc<Mutex<TcpListener>>>,
+    listener: Option<TcpListener>,
     /// to accept incoming connections
     receiver: Receiver,
     /// to send data to other peers
     sender: Sender,
     /// Peers which are required to be connected to this peer
-    peers_to_connect: HashSet<SocketAddr>,
+    peers_to_connect: Arc<Mutex<HashSet<SocketAddr>>>,
     /// Peers which are currently connected to this peer
     connected_peers: Vec<TcpStream>,
 }
@@ -119,22 +121,25 @@ impl Peer {
         Ok(())
     }
 
-    async fn start_listen_connections(&self, listener: &Arc<Mutex<TcpListener>>)
-        -> io::Result<()> {
+    async fn start_listen_connections(&self) {
         //-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let listener = listener.clone();
-        let peers = Arc::new(self.peers_to_connect);
-        tokio::spawn(async move {
-            loop {
-                let listener = listener.lock().unwrap();
-                if let Ok((mut socket, addr)) = listener.accept().await {
+        //let listener = listener.clone();
+        let listener = Arc::new(Mutex::new(&self.listener));
+        let peers = self.peers_to_connect.clone();
+
+        loop {
+            let peers = peers.clone();
+            let listener = listener.lock().await;
+            if let Ok((socket, addr)) = listener.as_ref().unwrap().accept().await {
+                let socket = Arc::new(Mutex::new(socket));
+                tokio::spawn(async move {
                     debug!("process incoming connection : {addr}");
-                    let processed = Self::process_incoming(peers.clone(), &mut socket).await;
+                    let mut socket = socket.lock().await;
+                    let processed = Self::process_incoming(peers, &mut socket).await;
                     debug!("process_incoming: {:?}", processed);
-                }
+                });
             }
-        });
-        Ok(())
+        }
     }
 
     async fn handle_started(&mut self, is_only: bool, connect_to: &Option<String>, addr: &str)
@@ -148,9 +153,10 @@ impl Peer {
                 // TODO maybe I should return error?
                 return Ok(())
             }
-            let listener = listener.unwrap();
-            self.listener = Some(Arc::new(Mutex::new(listener)));
-            Self::start_listen_connections(self, self.listener.as_ref().unwrap()).await?;
+            //let listener = listener.unwrap();
+            //self.listener = Some(Arc::new(Mutex::new(listener)));
+            self.listener = Some(listener.unwrap());
+            Self::start_listen_connections(self).await;
             self.state = State::Waiting;
             Ok(())
         } else {
@@ -160,9 +166,10 @@ impl Peer {
                 self.state = State::Disconnected;
                 return Ok(())
             }
-            let listener = listener.unwrap();
-            self.listener = Some(Arc::new(Mutex::new(listener)));
-            Self::start_listen_connections(self, self.listener.as_ref().unwrap()).await?;
+            // let listener = listener.unwrap();
+            // self.listener = Some(Arc::new(Mutex::new(listener)));
+            self.listener = Some(listener.unwrap());
+            Self::start_listen_connections(self).await;
             // connect to initial peer and get all peers
             let mut peer_conn = try_connect(connect_to.as_ref().unwrap()).await?;
             let peers_to_connect = request_peers(&mut peer_conn).await?;
@@ -192,7 +199,9 @@ impl Peer {
     //
     // }
 
-    async fn process_incoming(peers_to_connect: Arc<HashSet<SocketAddr>>, socket: &mut TcpStream) -> io::Result<()> {//-> RequestResult<()> {
+    async fn process_incoming(
+        peers_to_connect: Arc<Mutex<HashSet<SocketAddr>>>,
+        socket: &mut TcpStream) -> io::Result<()> {//-> RequestResult<()> {
         let mut cmd_buf = [0u8; 1];
         read_exact_async(socket, &mut cmd_buf).await?;
         let msg = Message::try_from(cmd_buf[0])?;
@@ -206,6 +215,7 @@ impl Peer {
                     })?)
             },
             Message::PeersRequest => {
+                let peers_to_connect = peers_to_connect.lock().await;
                 Ok(respond_peers(socket, &peers_to_connect).await?)
             }
         }
@@ -250,7 +260,7 @@ impl Sender {
 
     async fn send_initial_msg(&mut self, period: Duration, peers: &HashSet<SocketAddr>) -> Result<(), Error> {
         if peers.is_empty() {
-            return Err(Error::new(ErrorKind::Other, "oh no!"))
+            return Err(Error::new(ErrorKind::Other, "oh no send_initial_msg!"))
         } else {
             let msg = gen_rnd_msg();
             for peer in peers.iter() {
