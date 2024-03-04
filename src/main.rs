@@ -11,11 +11,12 @@ mod network;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    tracing_subscriber::fmt::init();
     let args = Args::parse();
     let period =  args.period;
     let port = args.port;
     let connect = args.connect;
-    Peer::new(port).start(Duration::from_secs(period), connect).await?;
+    Peer::new(port, connect).run(Duration::from_secs(period)).await;
     Ok(())
 }
 

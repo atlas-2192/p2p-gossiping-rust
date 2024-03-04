@@ -14,13 +14,15 @@ pub(crate) enum Message {
 }
 
 impl TryFrom<u8> for Message {
-    type Error = RequestError;
+    //type Error = RequestError;
+    type Error = io::Error;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0u8 => Ok(Message::Gossiping),
             1u8 => Ok(Message::PeersRequest),
-            _ => Err(RequestError::Recv(WrongCommand))
+            // _ => Err(RequestError::Recv(WrongCommand))
+            _ => Err(Error::new(ErrorKind::Other, "oh no!"))
         }
     }
 }
@@ -51,7 +53,8 @@ pub(crate) async fn accept_connection<A>(addrs: A) -> ConnectResult<TcpStream>
 }
 
 /// Intended to be used after ['network::try_connect()']
-pub(crate) async fn request_peers(socket: &mut TcpStream) -> RequestResult<HashSet<SocketAddr>> {
+/// Peer sends all available peers except itself since connection has already been established
+pub(crate) async fn request_peers(socket: &mut TcpStream) -> io::Result<HashSet<SocketAddr>> { //-> RequestResult<HashSet<SocketAddr>> {
     let cmd_byte = u8::from(Message::PeersRequest);
     let cmd_buf = [cmd_byte; 1];
     write_all_async(socket, &cmd_buf).await?;
@@ -65,7 +68,7 @@ pub(crate) async fn request_peers(socket: &mut TcpStream) -> RequestResult<HashS
 }
 
 /// Intended to be used after ['network::try_connect()']
-pub(crate) async fn respond_peers(socket: &mut TcpStream, peers: &HashSet<SocketAddr>) -> SendResult {
+pub(crate) async fn respond_peers(socket: &mut TcpStream, peers: &HashSet<SocketAddr>) -> io::Result<()> { //-> SendResult {
     let data_buf = serialize_data(peers);
     let data_buf_len = (data_buf.len() as u32).to_be_bytes();
     write_all_async(socket, &data_buf_len).await?;
@@ -75,7 +78,7 @@ pub(crate) async fn respond_peers(socket: &mut TcpStream, peers: &HashSet<Socket
 
 /// Intended to be used after [`try_connect()`]
 /// Write message to the socket after establishing connection with handshake
-pub(crate) async fn write_msg<Data: AsRef<str>>(socket: &mut TcpStream, data: Data) -> Result<(), RequestError> {
+pub(crate) async fn write_msg<Data: AsRef<str>>(socket: &mut TcpStream, data: Data) -> io::Result<()> { // -> Result<(), RequestError> {
     let cmd_buf = [0u8; 1];
     write_all_async(socket, &cmd_buf).await?;
     let data_buf = data.as_ref().as_bytes();
@@ -85,7 +88,7 @@ pub(crate) async fn write_msg<Data: AsRef<str>>(socket: &mut TcpStream, data: Da
     Ok(())
 }
 
-pub(crate) async fn write_msg_arc<Data: AsRef<str>>(socket: Arc<Mutex<&TcpStream>>, data: Data) -> Result<(), RequestError> {
+pub(crate) async fn write_msg_arc<Data: AsRef<str>>(socket: Arc<Mutex<&TcpStream>>, data: Data) -> io::Result<()> { //  -> Result<(), RequestError> {
     let socket = socket.lock().unwrap();
     let cmd_buf = [0u8; 1];
     write_all_async(&*socket, &cmd_buf).await?;
@@ -98,7 +101,7 @@ pub(crate) async fn write_msg_arc<Data: AsRef<str>>(socket: Arc<Mutex<&TcpStream
 
 /// Intended to be used after ['network::accept_connection()']
 /// Read message from the socket after establishing connection with handshake
-pub(crate) async fn read_msg(socket: &mut TcpStream) -> Result<String, RequestError> {
+pub(crate) async fn read_msg(socket: &mut TcpStream) -> io::Result<String> { // -> Result<String, RequestError> {
     let mut cmd_buf = [0u8; 1];
     read_exact_async(socket, &mut cmd_buf).await?;
     let mut len_buf = [0; 4];

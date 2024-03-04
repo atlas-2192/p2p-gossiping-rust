@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io;
+use tracing::{debug, error, info};
+use tracing::field::debug;
 use crate::error::{ConnectError, RequestError, RequestResult, SendError};
 use crate::network::{Message, read_exact_async, read_msg, request_peers, respond_peers, try_connect, write_msg, write_msg_arc};
 
@@ -17,101 +19,180 @@ const HOST: &str = "127.0.0.1";
 /// base struct for networking interaction
 #[derive(Debug)]
 pub(crate) struct Peer {
+    state: State,
     port: u32,
+    /// TcpListener accepting [`Peer`] connections
+    listener: Option<Arc<Mutex<TcpListener>>>,
     /// to accept incoming connections
     receiver: Receiver,
     /// to send data to other peers
     sender: Sender,
-    /// peer_id / addr
-    peers: HashSet<SocketAddr>,
+    /// Peers which are required to be connected to this peer
+    peers_to_connect: HashSet<SocketAddr>,
+    /// Peers which are currently connected to this peer
+    connected_peers: Vec<TcpStream>,
+}
+
+/// States in which peer can be from start up until disconnection
+#[derive(Debug, Clone)]
+enum State {
+    /// Started, trying to establish connection with initial peer
+    /// via --connect flag if is_only = true
+    Started { is_only: bool, connect_to: Option<String> },
+    /// Waiting for incoming connections if the peer is alone
+    Waiting,
+    /// The peer has established connections with all available peers
+    Connected,
+    /// The peer stopped and disconnected
+    Disconnected,
 }
 
 impl Peer {
 
-    pub fn new(port: u32) -> Self {
+    pub fn new(port: u32, connect_to: Option<String>) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(20);
         let receiver = Receiver::new(tx, port);
         let peers = Default::default();
         let sender = Sender::new(rx);
+        let state = match connect_to {
+            None => State::Started {is_only: true, connect_to: None},
+            Some(value) => State::Started { is_only: false, connect_to: Some(value)},
+        };
         Peer {
+            state,
             port,
+            listener: None,
             receiver,
             sender,
-            peers,
+            peers_to_connect: peers,
+            connected_peers: Default::default(),
         }
     }
-    /// Start listening incoming connections on 'port' with 'period' in secs.
+
+
     /// The 'connect_to' arg is None if this peer is first in the network
     ///
     /// # Errors
-    /// If unable to start listening on specified `port`
+    /// If unable to start listening on specified port
     /// format `address:port`.
     #[allow(unused_doc_comments)]
-    pub async fn start(&mut self, period: Duration, connect_to: Option<String>) -> RequestResult<()> {
+    pub async fn run(&mut self, period: Duration) -> Result<(), Box<dyn std::error::Error + Send + Sync>> { //  -> RequestResult<()>
         let addr = String::from(HOST) + &self.port.to_string();
-        println!("My address is : {}", &addr);
-        if connect_to.is_some() {
-            let peer = SocketAddr::from_str(connect_to.as_ref().unwrap())
-                .map_err(|e| RequestError::Send(SendError::Io(Error::from(ErrorKind::InvalidData))))?;
-            match try_connect(peer).await {
-                Ok(mut stream) => {
-                    let peers = request_peers(&mut stream).await?;
-                    let connected = Arc::new(Mutex::new(vec![]));
-                    for peer in peers.iter() {
-                        if let Ok(peer_conn) = try_connect(peer).await {
-                            let mut connected = connected.lock().unwrap();
-                            connected.push(peer_conn);
-                            self.peers.insert(*peer);
-                        } else {
-                            println!("couldn't connect to peer {peer}")
-                        }
+        info!("My address is : {}", &addr);
+        loop {
+            let state = &self.state.clone();
+            match state {
+                /// Peer can start as the first peer, or it can try to connect initial peer
+                State::Started { is_only, connect_to } => {
+                    let started = Self::handle_started(self, *is_only, connect_to, &addr).await;
+                    if let Ok(_) = started {
+                        continue
+                    } else {
+                        let err = started.err().unwrap();
+                        error!("Error: {}", err);
+                        return Err(err)
                     }
-                    {
-                        // This scope is needed for dropping MutexGuard<Vec<TcpStream>>
-                        let mut connected = connected.lock().unwrap();
-                        let output = format!(
-                            "Connected to the peers at [{}]",
-                            connected.iter()
-                                .map(|stream| stream.peer_addr().unwrap().to_string())
-                                .fold(String::from("[\"") ,|acc, addr| acc.clone() + ", " + &addr)
-                        ) + "\"]";
-                        println!("{output}");
-                    }
-                    /// After connections have been established, start sending messages
-                    /// to each peer every [`period`] time interval
-                    let mut connected = connected.lock().unwrap();
-                    for mut peer_stream in connected.iter() {
-                        let peer_stream = Arc::new(Mutex::new(peer_stream));
-                        tokio::spawn(async move {
-                            loop {
-                                let msg = gen_rnd_msg();
-                                // TODO here we need reliable error handling
-                                if let Err(e) = write_msg_arc(peer_stream, &msg).await {
-                                    println!("error writing message: {e}");
-                                    break
-                                }
-                            }
-                        });
-                    }
-                },
-                Err(e) => {
-                    let peer = connect_to.unwrap();
-                    println!("Error while trying to connect to peer: {peer}, error: {e}");
-                    return Err(RequestError::Send(SendError::Io(Error::from(ErrorKind::InvalidData))))
+                }
+                /// Waiting for incoming connections
+                State::Waiting => {
+
+                    // match self.listener.as_ref().unwrap().accept().await {
+                    //     Ok((socket, addr)) => {
+                    //         info!("new client: {:?}", addr);
+                    //
+                    //         self.state = State::Connected;
+                    //         continue;
+                    //     },
+                    //     Err(e) => info!("couldn't get client: {:?}", e),
+                    // }
+                }
+                State::Connected => {}
+                /// Sending messages to other peers that this
+                /// peer has been disconnected (to avoid excessive requests)
+                State::Disconnected => {
+                    info!("Peer {} is terminating", &addr);
+                    break
                 }
             }
-        } else {
-            // start listening incoming connections
         }
+
         Ok(())
     }
 
-    /// Send message to peer with specified [`period`] time interval
-    async fn send_message_to_peer(&self, period: Duration) -> RequestResult<()> {
-
+    async fn start_listen_connections(&self, listener: &Arc<Mutex<TcpListener>>)
+        -> io::Result<()> {
+        //-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let listener = listener.clone();
+        let peers = Arc::new(self.peers_to_connect);
+        tokio::spawn(async move {
+            loop {
+                let listener = listener.lock().unwrap();
+                if let Ok((mut socket, addr)) = listener.accept().await {
+                    debug!("process incoming connection : {addr}");
+                    let processed = Self::process_incoming(peers.clone(), &mut socket).await;
+                    debug!("process_incoming: {:?}", processed);
+                }
+            }
+        });
+        Ok(())
     }
 
-    async fn process_incoming_message(&self, socket: &mut TcpStream) -> RequestResult<()> {
+    async fn handle_started(&mut self, is_only: bool, connect_to: &Option<String>, addr: &str)
+        -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        return if is_only {
+            self.state = State::Waiting;
+            let listener = TcpListener::bind(addr).await;
+            if let Err(ref err) = listener {
+                error!("Error: {err}");
+                self.state = State::Disconnected;
+                // TODO maybe I should return error?
+                return Ok(())
+            }
+            let listener = listener.unwrap();
+            self.listener = Some(Arc::new(Mutex::new(listener)));
+            Self::start_listen_connections(self, self.listener.as_ref().unwrap()).await?;
+            self.state = State::Waiting;
+            Ok(())
+        } else {
+            let listener = TcpListener::bind(addr).await;
+            if let Err(ref err) = listener {
+                error!("Error: {err}");
+                self.state = State::Disconnected;
+                return Ok(())
+            }
+            let listener = listener.unwrap();
+            self.listener = Some(Arc::new(Mutex::new(listener)));
+            Self::start_listen_connections(self, self.listener.as_ref().unwrap()).await?;
+            // connect to initial peer and get all peers
+            let mut peer_conn = try_connect(connect_to.as_ref().unwrap()).await?;
+            let peers_to_connect = request_peers(&mut peer_conn).await?;
+            // connection with initial peer is already established
+            self.connected_peers.push(peer_conn);
+            // try to establish connection with all known peers
+            let mut output = String::from("[\"");
+            for p in peers_to_connect.iter() {
+                let peer_conn = try_connect(p).await;
+                if let Ok(peer_conn) = peer_conn {
+                    output = output + &peer_conn.peer_addr().unwrap().to_string() + "\"";
+                    self.connected_peers.push(peer_conn);
+                } else {
+                    error!("Could not connect to peer : {:?}", peer_conn.err().unwrap());
+                }
+            }
+            output = output + "]";
+            info!("Connected to the peers at {}", output);
+            self.state = State::Connected;
+
+            Ok(())
+        }
+    }
+
+    /// Send message to peer with specified [`period`] time interval
+    // async fn send_message_to_peer(&self, period: Duration) -> RequestResult<()> {
+    //
+    // }
+
+    async fn process_incoming(peers_to_connect: Arc<HashSet<SocketAddr>>, socket: &mut TcpStream) -> io::Result<()> {//-> RequestResult<()> {
         let mut cmd_buf = [0u8; 1];
         read_exact_async(socket, &mut cmd_buf).await?;
         let msg = Message::try_from(cmd_buf[0])?;
@@ -125,7 +206,7 @@ impl Peer {
                     })?)
             },
             Message::PeersRequest => {
-                Ok(respond_peers(socket, &self.peers).await?)
+                Ok(respond_peers(socket, &peers_to_connect).await?)
             }
         }
     }
@@ -174,7 +255,10 @@ impl Sender {
             let msg = gen_rnd_msg();
             for peer in peers.iter() {
                 let mut stream = TcpStream::connect(peer).await?;
-                write_msg(&mut stream, &msg).await?;
+                let res = write_msg(&mut stream, &msg).await;
+                if let Err(res) = res {
+                    println!("Error write_msg : {res}");
+                }
             }
             Ok(())
         }
@@ -214,21 +298,74 @@ impl Receiver {
     }
 }
 
-
-// #[derive(Debug)]
-// struct Message {
-//     text: String,
-//     from: SocketAddr
-// }
-//
-// impl Display for Message {
-//     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-//         write!(f, "(Received message '{}' from {})", &self.text, &self.from)
-//     }
-// }
-
 fn gen_rnd_msg() -> String {
     use random_word::Lang;
     let msg = random_word::gen(Lang::En);
     String::from(msg)
 }
+
+// /// Start listening incoming connections on 'port' with 'period' in secs.
+//     /// The 'connect_to' arg is None if this peer is first in the network
+//     ///
+//     /// # Errors
+//     /// If unable to start listening on specified `port`
+//     /// format `address:port`.
+//     #[allow(unused_doc_comments)]
+//     pub async fn start(&mut self, period: Duration, connect_to: Option<String>) -> RequestResult<()> {
+//         let addr = String::from(HOST) + &self.port.to_string();
+//         println!("My address is : {}", &addr);
+//         if connect_to.is_some() {
+//             let peer = SocketAddr::from_str(connect_to.as_ref().unwrap())
+//                 .map_err(|e| RequestError::Send(SendError::Io(Error::from(ErrorKind::InvalidData))))?;
+//             match try_connect(peer).await {
+//                 Ok(mut stream) => {
+//                     let peers = request_peers(&mut stream).await?;
+//                     let connected = Arc::new(Mutex::new(vec![]));
+//                     for peer in peers.iter() {
+//                         if let Ok(peer_conn) = try_connect(peer).await {
+//                             let mut connected = connected.lock().unwrap();
+//                             connected.push(peer_conn);
+//                             self.peers.insert(*peer);
+//                         } else {
+//                             println!("couldn't connect to peer {peer}")
+//                         }
+//                     }
+//                     {
+//                         // This scope is needed for dropping MutexGuard<Vec<TcpStream>>
+//                         let mut connected = connected.lock().unwrap();
+//                         let output = format!(
+//                             "Connected to the peers at [{}]",
+//                             connected.iter()
+//                                 .map(|stream| stream.peer_addr().unwrap().to_string())
+//                                 .fold(String::from("[\"") ,|acc, addr| acc.clone() + ", " + &addr)
+//                         ) + "\"]";
+//                         println!("{output}");
+//                     }
+//                     /// After connections have been established, start sending messages
+//                     /// to each peer every [`period`] time interval
+//                     let mut connected = connected.lock().unwrap();
+//                     for mut peer_stream in connected.iter() {
+//                         let peer_stream = Arc::new(Mutex::new(peer_stream));
+//                         tokio::spawn(async move {
+//                             loop {
+//                                 let msg = gen_rnd_msg();
+//                                 // TODO here we need reliable error handling
+//                                 if let Err(e) = write_msg_arc(peer_stream, &msg).await {
+//                                     println!("error writing message: {e}");
+//                                     break
+//                                 }
+//                             }
+//                         });
+//                     }
+//                 },
+//                 Err(e) => {
+//                     let peer = connect_to.unwrap();
+//                     println!("Error while trying to connect to peer: {peer}, error: {e}");
+//                     return Err(RequestError::Send(SendError::Io(Error::from(ErrorKind::InvalidData))))
+//                 }
+//             }
+//         } else {
+//             // start listening incoming connections
+//         }
+//         Ok(())
+//     }
