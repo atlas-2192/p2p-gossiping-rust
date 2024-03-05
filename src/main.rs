@@ -2,15 +2,16 @@ use std::io;
 use std::time::Duration;
 use clap::Parser;
 use tracing::Level;
-use crate::peer::Peer;
+use tracing::info;
+use actix::prelude::*;
+use crate::peer::{Peer, RandomMessage};
 
 mod peer;
-mod sender;
-mod receiver;
 mod error;
 mod network;
 
-#[tokio::main]
+//#[tokio::main]
+#[actix_rt::main]
 async fn main() -> io::Result<()> {
     let subscriber = tracing_subscriber::fmt().with_max_level(Level::DEBUG).finish();
     tracing::subscriber::set_global_default(subscriber).expect("Could not set tracing subscriber");
@@ -18,7 +19,25 @@ async fn main() -> io::Result<()> {
     let period =  args.period;
     let port = args.port;
     let connect = args.connect;
-    Peer::new(port, connect).run(Duration::from_secs(period)).await;
+    // start new actor
+    let addr;
+    match connect {
+        Some(connect_to) => {
+            addr = Peer::new(8080, Some(connect_to)).await.start();
+        },
+        None => {
+            addr = Peer::new(8080, None).await.start();
+        }
+    }
+
+    // send message and get future for result
+    let res = addr.send(RandomMessage(gen_rnd_msg())).await;
+
+    // handle() returns tokio handle
+    //info!("RESULT: {}", res.unwrap());
+
+    // stop system and exit
+    System::current().stop();
     Ok(())
 }
 
@@ -34,5 +53,11 @@ struct Args {
     port: u32,
     /// The 'connect_to' arg is None if this peer is first in the network
     #[arg(long)]
-    connect: Option<String>,
+    connect: Option<u32>,
+}
+
+fn gen_rnd_msg() -> String {
+    use random_word::Lang;
+    let msg = random_word::gen(Lang::En);
+    String::from(msg)
 }

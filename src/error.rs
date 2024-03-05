@@ -3,6 +3,24 @@ use thiserror::Error;
 
 pub type ConnectResult<T> = Result<T, ConnectError>;
 
+#[derive(Debug, Error)]
+pub enum ResolverError {
+    #[error("Failed resolving hostname: {}", _0)]
+    Resolver(String),
+
+    /// Address is invalid
+    #[error("Invalid input: {}", _0)]
+    InvalidInput(&'static str),
+
+    /// Connecting took too long
+    #[error("Timeout out while establishing connection")]
+    Timeout,
+
+    /// Connection io error
+    #[error("{}", _0)]
+    IoError(#[from] io::Error),
+}
+
 /// Connection error. Includes IO and handshake error.
 #[derive(Debug, Error)]
 pub enum ConnectError {
