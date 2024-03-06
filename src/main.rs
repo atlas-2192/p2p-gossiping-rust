@@ -32,7 +32,7 @@ async fn main() -> io::Result<()> {
     }
 
     // send message and get future for result
-    let res = addr.send(RandomMessage(gen_rnd_msg())).await;
+    //let res = addr.send(RandomMessage(gen_rnd_msg())).await;
 
     // handle() returns tokio handle
     //info!("RESULT: {}", res.unwrap());

@@ -84,47 +84,40 @@ impl Actor for Peer {
         todo!()
     }
 
-    async fn started(&mut self, ctx: &mut Context<Self>) {
+    fn started(&mut self, ctx: &mut Context<Self>) {
         // Start peer with --connect flag: trying establish connection
         if self.connect_to.is_some() {
-            let connect_to = Arc::new(self.connect_to.unwrap());
-            let connect_to2 = connect_to.clone();
-            info!("Trying to connect to peer {connect_to}");
+            let connect_to = self.connect_to.unwrap();
+            info!("Trying to connect to initial peer {connect_to}");
             ctx.spawn(async move {
-                let connect_to1 = connect_to.clone();
-                TcpStream::connect(*connect_to1).await
+                TcpStream::connect(connect_to).await
             }
                 .into_actor(self)
-                .then(|stream, actor, ctx| {
-                    if stream.is_err() {
-                        error!("couldn't establish connection with peer: {}", *connect_to2);
-                        ctx.stop()
-                    } else {
-                        let stream = stream.unwrap();
-                        // ctx.add_stream(async move {
-                        //     stream
-                        // });
-                        //actor.peer_conns.push(stream);
-                        // Getting other peers addr
-                    }
+                .map_err(move |err, _actor, ctx| {
+                    error!("couldn't establish connection with peer: {}", err);
+                    ctx.stop()
+                })
+                .then(move |stream, actor, ctx| {
+                    let stream = stream.unwrap();
+                    actor.peer_conns.push(stream);
+                    // Getting other peers addr
                     fut::ready(())
                 })
             );
         } else {
             info!("Peer is the first peer");
-            ctx.spawn(async {
-                TcpListener::bind(self.socket_addr).await
+            let socket_addr = self.socket_addr.clone();
+            ctx.spawn(async move {
+                TcpListener::bind(socket_addr).await
             }
                 .into_actor(self)
-                .map(|listener, actor, ctx| match listener {
-                    Ok(listener) => {
-                        debug!("Tcp listener has been bound to `{}`", actor.socket_addr);
-                        actor.listener = Some(listener);
-                    }
-                    Err(err) => {
-                        println!("Cannot bind Tcp listener : {}", err);
-                        ctx.stop();
-                    }
+                .map_err(|err, _actor, ctx| {
+                    error!("Cannot bind Tcp listener : {}", err);
+                    ctx.stop();
+                })
+                .map(|listener, actor, _ctx| {
+                    debug!("Tcp listener has been bound to `{}`", actor.socket_addr);
+                    actor.listener = Some(listener.unwrap());
                 })
             );
         }
