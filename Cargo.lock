@@ -453,11 +453,13 @@ dependencies = [
  "actix",
  "actix-rt",
  "bincode",
+ "bytes",
  "clap",
  "random_word",
  "serde",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]

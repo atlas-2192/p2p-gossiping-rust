@@ -9,6 +9,7 @@ use crate::peer::{Peer, RandomMessage};
 mod peer;
 mod error;
 mod network;
+mod codec;
 
 //#[tokio::main]
 #[actix_rt::main]
@@ -23,10 +24,10 @@ async fn main() -> io::Result<()> {
     let addr;
     match connect {
         Some(connect_to) => {
-            addr = Peer::new(8080, Some(connect_to)).await.start();
+            addr = Peer::new(port, Some(connect_to)).await.start();
         },
         None => {
-            addr = Peer::new(8080, None).await.start();
+            addr = Peer::new(port, None).await.start();
         }
     }
 
