@@ -20,7 +20,7 @@ async fn main() -> io::Result<()> {
     let period =  args.period;
     let port = args.port;
     let connect = args.connect;
-    // start new actor
+
     let addr;
     match connect {
         Some(connect_to) => {
@@ -32,7 +32,7 @@ async fn main() -> io::Result<()> {
     }
 
     // send message and get future for result
-    //let res = addr.send(RandomMessage(gen_rnd_msg())).await;
+    let res = addr.send(RandomMessage{message: gen_rnd_msg()});
 
     // handle() returns tokio handle
     //info!("RESULT: {}", res.unwrap());

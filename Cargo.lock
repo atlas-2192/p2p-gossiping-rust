@@ -455,6 +455,7 @@ dependencies = [
  "bincode",
  "bytes",
  "clap",
+ "log",
  "random_word",
  "serde",
  "thiserror",

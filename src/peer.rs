@@ -2,10 +2,7 @@ use std::collections::{HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::sync::Arc;
-use actix::dev::{MessageResponse, OneshotSender};
 use actix::prelude::*;
-use tokio::io::WriteHalf;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info};
 use crate::codec::P2PCodec;
@@ -18,6 +15,7 @@ impl Message for ConnectAddr {
     type Result = Result<TcpStream, ResolverError>;
 }
 
+#[derive(Debug)]
 pub struct Peer {
     socket_addr: SocketAddr,
     connect_to: Option<SocketAddr>,
@@ -26,17 +24,55 @@ pub struct Peer {
     peer_conns: Vec<Connection>,
 }
 
+#[derive(Debug)]
 struct Connection {
     stream: TcpStream,
-    addr: Addr<Peer>,
+    peer_addr: Addr<Peer>,
 }
 
-pub struct Session {
-    /// Unique session id
-    id: usize,
-
-    // _framed: actix::io::FramedWrite<WriteHalf<TcpStream>, P2PCodec>,
+impl Connection {
+    fn new(stream: TcpStream, peer_addr: Addr<Peer>) -> Self {
+        Self { stream, peer_addr }
+    }
 }
+
+impl Actor for Connection {
+    type Context = Context<Self>;
+}
+
+impl Handler<RandomMessage> for Connection {
+    type Result = ();
+
+    fn handle(&mut self, msg: RandomMessage, _ctx: &mut Self::Context) -> Self::Result {
+        info!("Handler<RandomMessage> for Connection Received message [{}]", msg.message); // from {:?} , msg.from
+        ()
+    }
+}
+
+// TODO change Handler<PeersRequest> -> Handler<OtherType>
+impl Handler<PeersRequest> for Connection {
+    //type Result = MessageResult<PeersRequest>;
+
+    type Result = ResponseActFuture<Self, Peers>;
+
+    fn handle(&mut self, _msg: PeersRequest, _ctx: &mut Self::Context) -> Self::Result {
+        let peers = self.peer_addr
+            .send(PeersRequest{})
+            .into_actor(self)
+            .map_err(move |err, _actor, ctx| {
+                // TODO handle error
+                error!("couldn't get peers from peer: {}", err);
+                ctx.stop()
+            })
+            .map(move |res, _actor, _ctx| {
+                debug!("peers (connection handler): {:?}", res);
+                res.unwrap()
+            });
+
+        Box::pin(peers)
+    }
+}
+
 impl Peer {
     pub async fn new(port: u32, connect_to: Option<u32>) -> Self {
         // TODO for linux 0.0.0.0 - create env
@@ -70,25 +106,36 @@ impl Peer {
         }
     }
 
+    fn start_listening(&mut self, ctx: &mut Context<Self>) {
+        debug!("Start listening incoming connections on {}", self.socket_addr);
+        let socket_addr = self.socket_addr.clone();
+        ctx.spawn(async move {
+            TcpListener::bind(socket_addr).await
+        }
+            .into_actor(self)
+            .map_err(|err, _actor, ctx| {
+                error!("Cannot bind Tcp listener : {}", err);
+                ctx.stop();
+            })
+            .map(|listener, actor, _ctx| {
+                debug!("Tcp listener has been bound to `{}`", actor.socket_addr);
+                actor.listener = Some(listener.unwrap());
+            })
+        );
+
+    }
 
 }
 
 impl Actor for Peer {
     type Context = Context<Self>;
 
-    fn create<F>(f: F) -> Addr<Self>
-        where
-            Self: Actor<Context=Context<Self>>,
-            F: FnOnce(&mut Context<Self>) -> Self
-    {
-        todo!()
-    }
-
+    #[allow(unused_doc_comments)]
     fn started(&mut self, ctx: &mut Context<Self>) {
         // Start peer with --connect flag: trying establish connection
         if self.connect_to.is_some() {
             let connect_to = self.connect_to.unwrap();
-            info!("Trying to connect to initial peer {connect_to}");
+            debug!("Trying to connect to initial peer {connect_to}");
             ctx.spawn(async move {
                 TcpStream::connect(connect_to).await
             }
@@ -97,30 +144,19 @@ impl Actor for Peer {
                     error!("couldn't establish connection with peer: {}", err);
                     ctx.stop()
                 })
-                .then(move |stream, actor, ctx| {
+                .then(move |stream, _actor, ctx| {
                     let stream = stream.unwrap();
-                    actor.peer_conns.push(stream);
-                    // Getting other peers addr
+                    /// Associate remote peer with [`Connection`] actor
+                    let conn = Connection::new(stream, ctx.address()).start();
+                    let _ = conn.send(PeersRequest{});
+                    //actor.peer_conns.push(conn);
                     fut::ready(())
                 })
             );
         } else {
-            info!("Peer is the first peer");
-            let socket_addr = self.socket_addr.clone();
-            ctx.spawn(async move {
-                TcpListener::bind(socket_addr).await
-            }
-                .into_actor(self)
-                .map_err(|err, _actor, ctx| {
-                    error!("Cannot bind Tcp listener : {}", err);
-                    ctx.stop();
-                })
-                .map(|listener, actor, _ctx| {
-                    debug!("Tcp listener has been bound to `{}`", actor.socket_addr);
-                    actor.listener = Some(listener.unwrap());
-                })
-            );
+            debug!("Peer is the first peer");
         }
+        Self::start_listening(self, ctx);
     }
 
     fn stopping(&mut self, ctx: &mut Self::Context) -> Running {
@@ -140,7 +176,7 @@ impl Actor for Peer {
 #[derive(Message)]
 #[rtype(result = "()")]
 pub struct RandomMessage {
-    pub from: Addr<Peer>,
+    //pub from: Addr<Peer>,
     pub message: String
 }
 
@@ -148,12 +184,14 @@ pub struct RandomMessage {
 #[rtype(result = "Peers")]
 pub struct PeersRequest;
 
+#[derive(Debug)]
 pub struct Peers(pub HashSet<SocketAddr>);
 
 impl Handler<PeersRequest> for Peer {
     type Result = MessageResult<PeersRequest>;
 
     fn handle(&mut self, _msg: PeersRequest, _ctx: &mut Self::Context) -> Self::Result {
+        debug!("handle PeersRequest...");
         let peers = self.peers.to_owned();
         MessageResult(Peers(peers))
     }
@@ -167,10 +205,17 @@ impl Handler<RandomMessage> for Peer {
     type Result = ();
 
     fn handle(&mut self, msg: RandomMessage, _ctx: &mut Context<Self>) -> Self::Result {
-        info!("Received message [{}] from {:?}", msg.message, msg.from);
+        info!("Handler<RandomMessage> for Peer Received message [{}]", msg.message);  // from {:?} , msg.from
         ()
     }
 }
+
+// pub struct Session {
+//     /// Unique session id
+//     id: usize,
+//
+//     // _framed: actix::io::FramedWrite<WriteHalf<TcpStream>, P2PCodec>,
+// }
 
 // fn started(&mut self, ctx: &mut Context<Self>) {
 //         // Start peer with --connect flag: trying establish connection
