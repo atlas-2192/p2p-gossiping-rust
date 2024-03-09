@@ -1,12 +1,12 @@
 use std::collections::HashSet;
-use crate::error::{ConnectError, ConnectResult, RecvError, RecvResult, RequestError, RequestResult, SendResult};
+use crate::error::{ConnectError, ConnectResult, RecvError, RequestError};
 use std::io::{Error, ErrorKind};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
 use bincode::{DefaultOptions, Options};
 use tokio::io;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
-use crate::error::RecvError::WrongCommand;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
 pub(crate) enum Message {
     Gossiping,
@@ -64,10 +64,10 @@ pub(crate) async fn request_peers(socket: &mut TcpStream) -> io::Result<HashSet<
     let mut data_buf = vec![0; len as _];
     read_exact_async(socket, &mut data_buf).await?;
     // let peers = deserialize_data(&data_buf)?;
-    if let Ok(peers) = deserialize_data(&data_buf) {
-        return Ok(peers)
+    return if let Ok(peers) = deserialize_data(&data_buf) {
+        Ok(peers)
     } else {
-        return Err(Error::new(ErrorKind::Other, "oh no request_peers!"))
+        Err(Error::new(ErrorKind::Other, "oh no request_peers!"))
     }
 
 }
@@ -93,15 +93,32 @@ pub(crate) async fn write_msg<Data: AsRef<str>>(socket: &mut TcpStream, data: Da
     Ok(())
 }
 
-pub(crate) async fn write_msg_arc<Data: AsRef<str>>(socket: Arc<Mutex<&TcpStream>>, data: Data) -> io::Result<()> { //  -> Result<(), RequestError> {
-    let socket = socket.lock().unwrap();
-    let cmd_buf = [0u8; 1];
-    write_all_async(&*socket, &cmd_buf).await?;
+pub async fn send_message<Data: AsRef<str>>(stream: &mut OwnedWriteHalf, data: Data) -> Result<(), Error> {
     let data_buf = data.as_ref().as_bytes();
-    let data_buf_len = (data_buf.len() as u32).to_be_bytes();
-    write_all_async(&*socket, &data_buf_len).await?;
-    write_all_async(&*socket, data_buf).await?;
+    let size: u32 = data_buf.len() as u32;
+    let mut buf: Vec<u8> = Vec::with_capacity(data_buf.len() + 2);
+    buf.write_u32(size).await?;
+    buf.write_all(data_buf).await?;
+    stream.as_ref().writable().await?;
+    stream.write_all(buf.as_slice()).await?;
+    stream.flush().await?;
     Ok(())
+}
+
+pub async fn read_message(stream: &mut OwnedReadHalf) -> Result<String, Error> {
+    let size = stream.read_u32().await? as usize;
+    if size > 0 {
+        let mut buf = vec![0_u8; size];
+        let mut read = 0;
+        while read < size {
+            stream.as_ref().readable().await?;
+            read += stream.read_exact(&mut buf[read..]).await?;
+        }
+        // TODO fix
+        Ok(String::from_utf8(buf).unwrap())
+    } else {
+        Err(io::Error::from(ErrorKind::Other))
+    }
 }
 
 /// Intended to be used after ['network::accept_connection()']

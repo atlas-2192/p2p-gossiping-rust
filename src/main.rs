@@ -4,16 +4,15 @@ use clap::Parser;
 use tracing::Level;
 use tracing::info;
 use actix::prelude::*;
-use crate::peer::{Peer, RandomMessage};
+use crate::peer::{Peer, SendRandomMessage};
 
 mod peer;
 mod error;
 mod network;
 mod codec;
+mod actor;
 
-//#[tokio::main]
-#[actix_rt::main]
-async fn main() -> io::Result<()> {
+fn main() -> io::Result<()> {
     let subscriber = tracing_subscriber::fmt().with_max_level(Level::DEBUG).finish();
     tracing::subscriber::set_global_default(subscriber).expect("Could not set tracing subscriber");
     let args = Args::parse();
@@ -21,24 +20,22 @@ async fn main() -> io::Result<()> {
     let port = args.port;
     let connect = args.connect;
 
-    let addr;
-    match connect {
-        Some(connect_to) => {
-            addr = Peer::new(port, Some(connect_to)).await.start();
-        },
-        None => {
-            addr = Peer::new(port, None).await.start();
+    let mut sys = System::new();
+
+    sys.block_on( async {
+        let peer;
+        match connect {
+            Some(connect_to) => {
+                peer = Peer::new(Duration::from_secs(period), port, Some(connect_to));
+            },
+            None => {
+                peer = Peer::new(Duration::from_secs(period), port, None);
+            }
         }
-    }
+        peer.await.expect("REASON").start()
+    });
 
-    // send message and get future for result
-    let res = addr.send(RandomMessage{message: gen_rnd_msg()});
-
-    // handle() returns tokio handle
-    //info!("RESULT: {}", res.unwrap());
-
-    // stop system and exit
-    System::current().stop();
+    let _ = sys.run();
     Ok(())
 }
 
