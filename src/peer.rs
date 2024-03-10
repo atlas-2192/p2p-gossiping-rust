@@ -1,5 +1,6 @@
 use std::error::Error;
-use scc::HashSet;
+//use scc::HashSet;
+use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::hash::{Hash, Hasher};
@@ -28,28 +29,28 @@ use crate::actor::NewConnection;
 #[derive(Debug)]
 pub(crate) struct Peer {
     /// peer's socket address
-    socket_addr: SocketAddr,
+    pub(crate) socket_addr: SocketAddr,
     /// peer to connect first
     pub(crate) connect_to: Option<SocketAddr>,
     /// to listen incoming connections
     listener: Arc<Mutex<Option<TcpListener>>>,
     /// peers haven't been connected yet
-    pub(crate) peers_to_connect: scc::HashSet<Connection>,
+    pub(crate) peers_to_connect: HashSet<SocketAddr>,
     /// active peer's connections
-    pub(crate) peer_conns: scc::HashSet<(Connection, PeerState)>,
+    pub(crate) peers: HashSet<RemotePeer>,
     /// time interval between sending messages
     pub(crate) period: Duration,
 }
 
 /// Remote peer's possible states
 #[derive(Hash, Eq, PartialEq, Debug)]
-pub(crate) enum PeerState {
+pub(crate) enum RemotePeer {
     /// Establishing connection with remote peer
-    Connecting,
+    Connecting(Arc<Connection>),
     /// Performing handshake
-    Handshake{result: bool},
+    Handshake{conn: Arc<Connection>, result: bool},
     /// Receiving incoming messages and sending the own ones
-    Connected,
+    Connected(Arc<Connection>),
     /// Error occurred while interaction
     Error(String),
     /// Stopping receiving and sending messages and notifying other peers
@@ -63,13 +64,25 @@ pub(crate) struct Connection {
     pub(crate) id: Uuid,
     /// remote peer address
     pub(crate) peer_addr: SocketAddr,
+    /// socket read half to read from incoming connections 
+    pub(crate) read: OwnedReadHalf,
+    /// socket read half to write into remote connections 
+    pub(crate) write: OwnedWriteHalf,
+    /// period to send messages
+    pub(crate) period: Duration,
 }
 
 impl Connection {
-    pub(crate) fn new(peer_addr: SocketAddr) -> Self {
+    pub(crate) fn new(stream: TcpStream, period: Duration) -> Self {
+        // TODO handle error?
+        let peer_addr = stream.peer_addr().unwrap();
+        let (read, write) = stream.into_split();
         Self {
             id: Uuid::new_v4(),
             peer_addr,
+            read,
+            write,
+            period
         }
     }
 }
@@ -119,14 +132,14 @@ impl Peer {
                 // when flag --connect is applied
                 let connect_to_addr = format!("127.0.0.1:{}", connect_to);
                 let connect_to_addr = SocketAddr::from_str(&connect_to_addr)?;
-                let peers_to_connect = HashSet::default();
-                peers_to_connect.insert(Connection::new(connect_to_addr)).expect("Unreachable");
+                let mut peers_to_connect = HashSet::default();
+                peers_to_connect.insert(connect_to_addr);
                 Ok(Self {
                     socket_addr,
                     connect_to: Some(connect_to_addr),
                     listener,
                     peers_to_connect,
-                    peer_conns: Default::default(),
+                    peers: Default::default(),
                     period
                 })
             },
@@ -137,7 +150,7 @@ impl Peer {
                     connect_to: None,
                     listener,
                     peers_to_connect,
-                    peer_conns: Default::default(),
+                    peers: Default::default(),
                     period
                 })
             }

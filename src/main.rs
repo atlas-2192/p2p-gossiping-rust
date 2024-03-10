@@ -4,7 +4,7 @@ use clap::Parser;
 use tracing::Level;
 use tracing::info;
 use actix::prelude::*;
-use crate::peer::{Peer, SendRandomMessage};
+use crate::peer::{Peer};
 
 mod peer;
 mod error;
