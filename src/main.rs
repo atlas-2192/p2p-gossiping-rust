@@ -28,11 +28,13 @@ fn main() -> io::Result<()> {
     sys.block_on( async {
         match connect {
             Some(connect_to) => {
-                if let Ok(addr) = SocketAddr::from_str(&connect_to.to_string()) {
+                let socket_addr = format!("127.0.0.1:{}", connect_to);
+                let socket_addr = SocketAddr::from_str(&socket_addr);
+                if let Ok(addr) = socket_addr {
                     Peer::new(port, Duration::from_secs(period), Some(addr)).start();
                 } else {
-                    // Stop
-                    error!("Could initialize peer");
+                    // TODO exit
+                    error!("wrong peer addr");
                 }
             },
             None => {
