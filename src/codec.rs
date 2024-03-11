@@ -6,29 +6,10 @@ use actix::prelude::*;
 use byteorder::{BigEndian, ByteOrder};
 use bytes::BytesMut;
 use actix_codec::{Decoder, Encoder};
-use serde::{Deserialize, Serialize};
-use serde_derive::{Deserialize, Serialize};
-//use tokio_util::codec::{Decoder, Encoder};
-//use tokio_io::_tokio_codec::{Decoder, Encoder};
-use crate::peer::Peer;
 
-/// Message coming from the network
-// #[derive(Debug, Message)]
-// #[rtype(result = "()")]
-// pub enum Request {
-//     RandomMessage(String),
-//     #[rtype(result = "()")]
-//     PeersRequest(PeersRequest),
-// }
-//
-// /// Message going to the network
-// #[derive(Debug, Message)]
-// #[rtype(result = "()")]
-// pub enum Response {
-//     Message(String),
-// }
 
-/// Codec for Client -> Server transport
+
+/// Codec for peer -> remote peer half
 pub struct PeerConnectionCodec;
 
 /// Implement decoder trait for P2P
@@ -41,7 +22,6 @@ impl Decoder for PeerConnectionCodec {
     }
 }
 
-/// Codec for peer -> remote peer half
 impl Encoder<Request> for PeerConnectionCodec {
 
     type Error = io::Error;
@@ -56,16 +36,16 @@ impl Encoder<Request> for PeerConnectionCodec {
 #[rtype(result = "()")]
 pub enum Request {
     RandomMessage(RandomMessage),
-    PeersRequest,
+    PeersRequest(PeersRequest),
 }
 
 #[derive(Debug, Message)]
 #[rtype(result = "()")]
-struct RandomMessage(String);
+pub struct RandomMessage(pub String);
 
-#[derive(Message)]
-#[rtype(result = "Peers")]
-struct PeersRequest;
+#[derive(Debug, Message)]
+#[rtype(result = "Result<Peers, io::Error>")]
+pub struct PeersRequest;
 
 /// Remote peer response
 #[derive(Debug, Message)]

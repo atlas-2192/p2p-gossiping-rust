@@ -4,17 +4,17 @@ use std::io::Error;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
-use actix::{Actor, ActorContext, ActorTryFutureExt, Addr, AsyncContext, Context, Handler, StreamHandler, WrapFuture};
+use actix::{Actor, ActorContext, ActorFutureExt, ActorTryFutureExt, Addr, AsyncContext, Context, Handler, StreamHandler, WrapFuture};
 use actix::io::{ WriteHandler};
 use actix_rt::spawn;
-use tokio::io::{split, WriteHalf};
+use tokio::io::{AsyncWriteExt, split, WriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::FramedRead;
 //use tokio_io::_tokio_codec::FramedRead;
 use tracing::{debug, info};
 use tracing::field::debug;
 use tracing::log::error;
-use crate::codec::{PeerConnectionCodec, Peers, RemotePeerConnectionCodec, Request, Response};
+use crate::codec::{PeerConnectionCodec, Peers, PeersRequest, RemotePeerConnectionCodec, Request, Response};
 use crate::remote_peer::RemotePeer;
 
 pub struct Peer {
@@ -60,23 +60,57 @@ impl Actor for Peer {
     type Context = Context<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
+        // Peer is the first in the network
         if self.connect_to.is_none() {
             info!("Peer has started on [{}]. Waiting for incoming connections", self.socket_addr);
             self.start_listening(ctx.address());
             return;
         }
+        // Trying to connect initial peer
+        self.start_listening(ctx.address());
         let connect_to = self.connect_to.unwrap();
         info!("Peer has started on [{}]. Trying to connect [{connect_to}]", self.socket_addr);
+        ctx.wait(async move {
+            // ERRORS
+            let stream = TcpStream::connect(connect_to).await.unwrap();
 
+            let addr = stream.peer_addr().unwrap();
+            let (r, w) = split(stream);
+            let initial_peer = RemotePeer::create(|ctx| {
+                RemotePeer::add_stream(FramedRead::new(r, RemotePeerConnectionCodec), ctx);
+                RemotePeer::new(addr, actix::io::FramedWrite::new(w, PeerConnectionCodec, ctx))
+            });
+            Ok(initial_peer)
+        }
+            .into_actor(self)
+            .map_err(|e, _act, ctx| {
+                error!("Couldn't establish connection with peer: {connect_to}, error {e}");
+                ctx.stop();
+            })
+            .map(|res, actor, _ctx| {
+                let initial_peer = res.unwrap();
+                // request all the other peers
+                let req = initial_peer.send(Request::PeersRequest(PeersRequest));
+                debug!("msg PeersRequest has sent to initial peer");
+                self.peers.insert(initial_peer);
+            }));
+
+        // TODO start sending messages
+        ctx.spawn(async move {  });
     }
 }
 
+/// Connection with remote peer
 pub struct Connection {
+    /// remote peer [`Actor`] address
     peer: Addr<Peer>,
+    /// stream to write messages to remote peer
     write: actix::io::FramedWrite<Request, WriteHalf<TcpStream>, PeerConnectionCodec>,
 }
 
 impl WriteHandler<std::io::Error> for Connection {}
+
+impl WriteHandler<std::io::Error> for Peer {}
 
 impl Connection {
     pub fn new(
@@ -88,6 +122,15 @@ impl Connection {
 
 impl Actor for Connection {
     type Context = Context<Self>;
+}
+
+impl Handler<PeersRequest> for Connection {
+    type Result = Result<Peers, io::Error>;
+
+    fn handle(&mut self, msg: PeersRequest, ctx: &mut Self::Context) -> Self::Result {
+        self.write.write(Request::PeersRequest(PeersRequest));
+        unimplemented!()
+    }
 }
 
 impl StreamHandler<Result<Response, io::Error>> for Connection {
@@ -121,7 +164,8 @@ impl Handler<Request> for Connection {
         debug!("Handler<Request> for Connection");
         match msg {
             Request::RandomMessage(msg) => self.write.write(Request::RandomMessage(msg)),
-            Request::PeersRequest => self.write.write(Request::PeersRequest),
+            // TODO matching
+            Request::PeersRequest(req) => self.write.write(Request::PeersRequest(req)),
         }
     }
 }
