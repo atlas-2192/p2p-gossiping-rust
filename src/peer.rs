@@ -1,231 +1,143 @@
-use std::error::Error;
-//use scc::HashSet;
 use std::collections::HashSet;
-use std::fmt::{Display, Formatter};
-use std::fs::File;
-use std::hash::{Hash, Hasher};
-use std::io::{BufReader, ErrorKind, Read};
+use std::io;
+use std::io::Error;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::sync::{Arc};
-use std::time::Duration; // , Mutex
-
-use actix::prelude::*;
-use async_stream::stream;
-use futures::pin_mut;
-use tokio::io::AsyncWriteExt;
+use std::time::Duration;
+use actix::{Actor, ActorContext, ActorTryFutureExt, Addr, AsyncContext, Context, Handler, StreamHandler, WrapFuture};
+use actix::io::{ WriteHandler};
+use actix_rt::spawn;
+use tokio::io::{split, WriteHalf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tracing::{debug, error, info, warn};
-use uuid::Uuid;
-use futures::stream::{self, StreamExt};
-use futures_util::task::SpawnExt;
-use crate::{gen_rnd_msg};
-use crate::network::{read_message, send_message};
-use crate::actor::NewConnection;
+use tokio_util::codec::FramedRead;
+//use tokio_io::_tokio_codec::FramedRead;
+use tracing::{debug, info};
+use tracing::field::debug;
+use tracing::log::error;
+use crate::codec::{PeerConnectionCodec, Peers, RemotePeerConnectionCodec, Request, Response};
+use crate::remote_peer::RemotePeer;
 
-
-#[derive(Debug)]
-pub(crate) struct Peer {
-    /// peer's socket address
-    pub(crate) socket_addr: SocketAddr,
-    /// peer to connect first
-    pub(crate) connect_to: Option<SocketAddr>,
-    /// to listen incoming connections
-    listener: Arc<Mutex<Option<TcpListener>>>,
-    /// peers haven't been connected yet
-    pub(crate) peers_to_connect: HashSet<SocketAddr>,
-    /// active peer's connections
-    pub(crate) peers: HashSet<RemotePeer>,
-    /// time interval between sending messages
-    pub(crate) period: Duration,
+pub struct Peer {
+    socket_addr: SocketAddr,
+    period: Duration,
+    connect_to: Option<SocketAddr>,
+    peers: HashSet<Addr<RemotePeer>>,
 }
-
-/// Remote peer's possible states
-#[derive(Hash, Eq, PartialEq, Debug)]
-pub(crate) enum RemotePeer {
-    /// Establishing connection with remote peer
-    Connecting(Arc<Connection>),
-    /// Performing handshake
-    Handshake{conn: Arc<Connection>, result: bool},
-    /// Receiving incoming messages and sending the own ones
-    Connected(Arc<Connection>),
-    /// Error occurred while interaction
-    Error(String),
-    /// Stopping receiving and sending messages and notifying other peers
-    Disconnected,
-}
-
-/// Connection between this and remote peer
-#[derive(Debug)]
-pub(crate) struct Connection {
-    /// Connection id
-    pub(crate) id: Uuid,
-    /// remote peer address
-    pub(crate) peer_addr: SocketAddr,
-    /// socket read half to read from incoming connections 
-    pub(crate) read: OwnedReadHalf,
-    /// socket read half to write into remote connections 
-    pub(crate) write: OwnedWriteHalf,
-    /// period to send messages
-    pub(crate) period: Duration,
-}
-
-impl Connection {
-    pub(crate) fn new(stream: TcpStream, period: Duration) -> Self {
-        // TODO handle error?
-        let peer_addr = stream.peer_addr().unwrap();
-        let (read, write) = stream.into_split();
-        Self {
-            id: Uuid::new_v4(),
-            peer_addr,
-            read,
-            write,
-            period
-        }
-    }
-}
-
-impl Hash for Connection {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.id.hash(state);
-    }
-}
-
-impl PartialEq for Connection {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-
-impl Eq for Connection {}
-
-impl From<Connection> for SocketAddr {
-    fn from(value: Connection) -> Self {
-        value.peer_addr
-    }
-}
-
 
 impl Peer {
-    pub async fn new(period: Duration, port: u32, connect_to: Option<u32>) -> Result<Self, Box<dyn Error>> {
-        // TODO for linux 0.0.0.0 - create env
+    pub fn new(port: u32, period: Duration, connect_to: Option<SocketAddr>) -> Self {
         let socket_addr = format!("127.0.0.1:{}", port);
         let socket_addr = SocketAddr::from_str(&socket_addr).unwrap();
-        let listener = Arc::new(Mutex::new(None));
 
-        let arc_listener = listener.clone();
-        tokio::spawn(async move {
-            let listener2 = arc_listener.clone();
-            let mut listener2 = listener2.lock().await;
-            // start listening incoming connections
-            let _ = listener2.insert(
-                TcpListener::bind(socket_addr).await
-                    .expect("Couldn't bind TCP listener"));
-            debug!("Tcp listener has been bound to `{}`", socket_addr);
-        });
-
-        match connect_to {
-            Some(connect_to) => {
-                // sending connection request to initial peer
-                // when flag --connect is applied
-                let connect_to_addr = format!("127.0.0.1:{}", connect_to);
-                let connect_to_addr = SocketAddr::from_str(&connect_to_addr)?;
-                let mut peers_to_connect = HashSet::default();
-                peers_to_connect.insert(connect_to_addr);
-                Ok(Self {
-                    socket_addr,
-                    connect_to: Some(connect_to_addr),
-                    listener,
-                    peers_to_connect,
-                    peers: Default::default(),
-                    period
-                })
-            },
-            None => {
-                let peers_to_connect = Default::default();
-                Ok(Self {
-                    socket_addr,
-                    connect_to: None,
-                    listener,
-                    peers_to_connect,
-                    peers: Default::default(),
-                    period
-                })
-            }
+        Self {
+            socket_addr,
+            period,
+            connect_to,
+            peers: Default::default()
         }
     }
 
-    pub(crate) fn start_listening(&mut self, ctx: &mut Context<Self>) {
-        debug!("Start listening incoming connections on {}", self.socket_addr);
-        let listener = self.listener.clone();
-        let listen_addr = self.socket_addr;
-        // let (_, mut finish): (oneshot::Sender<NewConnection>, oneshot::Receiver<NewConnection>) = oneshot::channel();
-        let conn_stream = stream! {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            let mut listener = listener.lock().await;
-            let listener = listener.as_mut().unwrap();
-            loop {
-                // tokio::select! {
-                //     accept = listener.accept() => {
-                        match listener.accept().await {
-                            Ok((stream, addr)) => {
-                                debug!(%listen_addr, from_addr = %addr, "Accepted connection");
-                                let new_conn = NewConnection(stream);
-                                yield new_conn;
-                            },
-                            Err(error) => {
-                                warn!(%error, "Error accepting connection");
-                                //yield ConnectAddr(SocketAddr::from_str("").unwrap());
-                            }
-                        }
-                    // }
-                    // _ = (&mut finish) => {
-                    //     info!("Listening stream finished");
-                    //     break;
-                    // }
-                    // else => break,
-                //}
+    pub fn start_listening(&self, self_addr: Addr<Peer>) {
+        let addr = &self.socket_addr;
+        let addr = addr.clone();
+
+        spawn(async move {
+            let listener = TcpListener::bind(addr).await.unwrap();
+            while let Ok((stream, addr)) = listener.accept().await {
+                debug!("peer [{addr}] connected");
+                let peer = self_addr.clone();
+                Connection::create(|ctx| {
+                    let (r, w) = split(stream);
+                    Connection::add_stream(FramedRead::new(r, RemotePeerConnectionCodec), ctx);
+                    Connection::new(peer, actix::io::FramedWrite::new(w, PeerConnectionCodec, ctx))
+                });
             }
-        };
-        ctx.add_stream(conn_stream);
+        });
     }
 }
 
-// #[derive(Message)]
-// #[rtype(result = "Responses")]
-// pub enum Messages {
-//     RandomMessage,
-//     PeersRequest,
-// }
-//
-// pub enum Responses {
-//     // For now keep it here
-//     GotRandomMessage,
-//     PeersResponse(HashSet<SocketAddr>),
-// }
-//
-// impl Handler<Messages> for Peer {
-//     type Result = Responses;
-//
-//     fn handle(&mut self, msg: Messages, _ctx: &mut Context<Self>) -> Self::Result {
-//         let peers = Default::default();
-//         match msg {
-//             Messages::RandomMessage => Responses::GotRandomMessage,
-//             Messages::PeersRequest => Responses::PeersResponse(peers),
-//         }
-//     }
-// }
-//
-// impl<A, M> MessageResponse<A, M> for Responses
-//     where
-//         A: Actor,
-//         M: Message<Result = Responses>,
-// {
-//     fn handle(self, ctx: &mut A::Context, tx: Option<OneshotSender<M::Result>>) {
-//         if let Some(tx) = tx {
-//             let sent = tx.send(self);
-//         }
-//     }
-// }
+impl Actor for Peer {
+    type Context = Context<Self>;
+
+    fn started(&mut self, ctx: &mut Self::Context) {
+        if self.connect_to.is_none() {
+            info!("Peer has started on [{}]. Waiting for incoming connections", self.socket_addr);
+            self.start_listening(ctx.address());
+            return;
+        }
+        let connect_to = self.connect_to.unwrap();
+        info!("Peer has started on [{}]. Trying to connect [{connect_to}]", self.socket_addr);
+
+    }
+}
+
+pub struct Connection {
+    peer: Addr<Peer>,
+    write: actix::io::FramedWrite<Request, WriteHalf<TcpStream>, PeerConnectionCodec>,
+}
+
+impl WriteHandler<std::io::Error> for Connection {}
+
+impl Connection {
+    pub fn new(
+        peer: Addr<Peer>,
+        write: actix::io::FramedWrite<Request, WriteHalf<TcpStream>, PeerConnectionCodec>) -> Self {
+        Self { peer, write }
+    }
+}
+
+impl Actor for Connection {
+    type Context = Context<Self>;
+}
+
+impl StreamHandler<Result<Response, io::Error>> for Connection {
+    fn handle(&mut self, item: Result<Response, io::Error>, ctx: &mut Self::Context) {
+        match item {
+            Ok(resp) => {
+                match resp {
+                    Response::Peers(peers) => {
+                        let _ = self.peer.send(Peers(peers.0))
+                                    .into_actor(self)
+                                    .map_err(|err, _act, ctx| {
+                                        // TODO handle possible errors
+                                        error!("Error: {err}");
+                                        ctx.stop();
+                                    });
+                    }
+                }
+            }
+            Err(err) => {
+                error!("Error while processing response: {err}");
+                ctx.stop();
+            }
+        }
+    }
+}
+
+impl Handler<Request> for Connection {
+    type Result = ();
+
+    fn handle(&mut self, msg: Request, _ctx: &mut Self::Context) -> Self::Result {
+        debug!("Handler<Request> for Connection");
+        match msg {
+            Request::RandomMessage(msg) => self.write.write(Request::RandomMessage(msg)),
+            Request::PeersRequest => self.write.write(Request::PeersRequest),
+        }
+    }
+}
+
+impl Handler<Peers> for Peer {
+    type Result = ();
+
+    fn handle(&mut self, msg: Peers, _ctx: &mut Self::Context) -> Self::Result {
+        debug!("Handler<Peers> for Peer");
+        let mut remote_peers = msg.0;
+        // In order not to send msg to itself
+        remote_peers.remove(&self.socket_addr);
+        // Including every peer in our network
+        for socket_addr in remote_peers.iter() {
+            let remote_peer = RemotePeer { socket_addr: *socket_addr }.start();
+            self.peers.insert(remote_peer);
+        }
+    }
+}

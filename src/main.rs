@@ -1,17 +1,20 @@
+mod peer;
+mod remote_peer;
+mod codec;
+
 use std::io;
+use std::io::{Error, ErrorKind};
+use std::net::SocketAddr;
+use std::str::FromStr;
 use std::time::Duration;
 use clap::Parser;
-use tracing::Level;
+use tracing::{error, Level};
 use tracing::info;
 use actix::prelude::*;
-use crate::peer::{Peer};
+use crate::peer::Peer;
 
-mod peer;
-mod error;
-mod network;
-mod codec;
-mod actor;
 
+//#[actix_rt::main]
 fn main() -> io::Result<()> {
     let subscriber = tracing_subscriber::fmt().with_max_level(Level::DEBUG).finish();
     tracing::subscriber::set_global_default(subscriber).expect("Could not set tracing subscriber");
@@ -20,19 +23,22 @@ fn main() -> io::Result<()> {
     let port = args.port;
     let connect = args.connect;
 
-    let mut sys = System::new();
+    let sys = System::new();
 
     sys.block_on( async {
-        let peer;
         match connect {
             Some(connect_to) => {
-                peer = Peer::new(Duration::from_secs(period), port, Some(connect_to));
+                if let Ok(addr) = SocketAddr::from_str(&connect_to.to_string()) {
+                    Peer::new(port, Duration::from_secs(period), Some(addr)).start();
+                } else {
+                    // Stop
+                    error!("Could initialize peer");
+                }
             },
             None => {
-                peer = Peer::new(Duration::from_secs(period), port, None);
+                Peer::new(port, Duration::from_secs(period), None).start();
             }
         }
-        peer.await.expect("REASON").start()
     });
 
     let _ = sys.run();
@@ -59,3 +65,15 @@ fn gen_rnd_msg() -> String {
     let msg = random_word::gen(Lang::En);
     String::from(msg)
 }
+
+//     // let peer;
+//     // match connect {
+//     //     Some(connect_to) => {
+//     //         let addr = SocketAddr::from_str(&connect_to.to_string())
+//     //             .map_err(|e| Error::new(ErrorKind::InvalidInput, e))?;
+//     //         peer = Peer::new(port, Duration::from_secs(period), Some(addr)).start();
+//     //     },
+//     //     None => {
+//     //         peer = Peer::new(port, Duration::from_secs(period), None).start();
+//     //     }
+//     // }
