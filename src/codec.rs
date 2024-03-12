@@ -12,13 +12,13 @@ use serde_derive::{Deserialize, Serialize};
 use tracing::{debug, error, info};
 
 
-/// Codec for [`crate::peer::ToRemoteConnection`]
-pub struct ToRemoteCodec;
+/// Codec for [`crate::peer::OutgoingConnection`]
+pub struct OutCodec;
 
 /// Request to remote peer
 #[derive(Debug, Message, Clone)]
 #[rtype(result = "()")]
-pub enum RequestToRemote {
+pub enum OutgoingRequest {
     /// send random message to remote peer
     RandomMessage(String, SocketAddr),
     /// request remote peer for all active peers in network
@@ -28,16 +28,16 @@ pub enum RequestToRemote {
 /// Remote peer response
 #[derive(Debug, Message)]
 #[rtype(result = "()")]
-pub enum ResponseFromRemote {
-    /// Response to [`RequestToRemote::PeersRequest`] from remote peer
+pub enum ResponseToOutgoing {
+    /// Response to [`OutgoingRequest::PeersRequest`] from remote peer
     Peers(HashSet<SocketAddr>),
     /// Placeholder for empty response
     Empty,
 }
 
 
-impl Decoder for ToRemoteCodec {
-    type Item = ResponseFromRemote;
+impl Decoder for OutCodec {
+    type Item = ResponseToOutgoing;
     type Error = io::Error;
 
     //// read response from remote peer
@@ -56,7 +56,7 @@ impl Decoder for ToRemoteCodec {
                 let msg = String::from_utf8(bytes_buf)
                     .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "Invalid utf8"))?;
                 debug!("Received message [{}]", &msg);
-                Ok(Some(ResponseFromRemote::Empty))
+                Ok(Some(ResponseToOutgoing::Empty))
             }
             1 => {
                 debug!("codec decode peers response");
@@ -65,21 +65,21 @@ impl Decoder for ToRemoteCodec {
                 let red = reader.read(&mut bytes_buf)?;
                 debug!("{red} bytes red , bytes: {:?}", &bytes_buf);
                 let peers = deserialize_data::<HashSet<SocketAddr>>(&bytes_buf)?;
-                Ok(Some(ResponseFromRemote::Peers(peers)))
+                Ok(Some(ResponseToOutgoing::Peers(peers)))
             }
             _ => Err(io::Error::new(ErrorKind::InvalidInput, "Wrong command"))
         }
     }
 }
 
-impl Encoder<RequestToRemote> for ToRemoteCodec {
+impl Encoder<OutgoingRequest> for OutCodec {
 
     type Error = io::Error;
 
     //// send request to remote peer
-    fn encode(&mut self, item: RequestToRemote, dst: &mut BytesMut) -> Result<(), Self::Error> {
+    fn encode(&mut self, item: OutgoingRequest, dst: &mut BytesMut) -> Result<(), Self::Error> {
         match item {
-            RequestToRemote::RandomMessage(msg, addr) => {
+            OutgoingRequest::RandomMessage(msg, addr) => {
                 debug!("codec encode random message");
                 let cmd_buf = [0u8; 1];
                 let mut writer = dst.writer();
@@ -90,7 +90,7 @@ impl Encoder<RequestToRemote> for ToRemoteCodec {
                 writer.write_all(&byte_buf)?;
                 Ok(())
             }
-            RequestToRemote::PeersRequest => {
+            OutgoingRequest::PeersRequest => {
                 debug!("codec encode peer request");
                 let cmd_buf = [1u8; 1];
                 let mut writer = dst.writer();
@@ -107,13 +107,13 @@ impl Encoder<RequestToRemote> for ToRemoteCodec {
     }
 }
 
-/// Codec for [`crate::peer::FromRemoteConnection`]
-pub struct FromRemoteCodec;
+/// Codec for [`crate::peer::IncomingConnection`]
+pub struct InCodec;
 
 /// Request from remote peer
 #[derive(Debug, Message)]
 #[rtype(result = "()")]
-pub enum RequestFromRemote {
+pub enum IncomingRequest {
     /// send random message to peer
     RandomMessage(String, SocketAddr),
     /// request all active peers in network
@@ -123,28 +123,53 @@ pub enum RequestFromRemote {
 /// response to remote peer
 #[derive(Debug, Message)]
 #[rtype(result = "()")]
-pub enum ResponseToRemote {
-    /// Response to [`RequestFromRemote::PeersRequest`] to remote peer
+pub enum ResponseToIncoming {
+    /// Response to [`IncomingRequest::PeersRequest`] to remote peer
     Peers(HashSet<SocketAddr>),
     /// Placeholder for empty response
     Empty,
 }
 
-impl Decoder for FromRemoteCodec {
-    type Item = ResponseToRemote;
+impl Decoder for InCodec {
+    type Item = ResponseToIncoming;
     type Error = io::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        debug!("Decoder for FromRemoteCodec");
-        Ok(None)
+        debug!("Decoder for responses for incoming requests");
+        debug!("incoming request: {:?}", src);
+        let mut reader = src.reader();
+        let mut cmd_buf = [0u8; 1];
+        let red = reader.read(&mut cmd_buf)?;
+        debug!("red {red} byte from buff, command: [{}]", &cmd_buf[0]);
+        match cmd_buf[0] {
+            0 => {
+                debug!("codec decode random message");
+                let size = reader.read_u32::<BigEndian>()?;
+                let mut bytes_buf = vec![0_u8; size as usize];
+                let red = reader.read(&mut bytes_buf)?;
+                debug!("{red} bytes red , bytes: {:?}", &bytes_buf);
+                let msg = String::from_utf8(bytes_buf)
+                    .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "Invalid utf8"))?;
+                // TODO read socket addr
+                debug!("Received message [{}]", &msg);
+                Ok(Some(ResponseToIncoming::Empty))
+            }
+            1 => {
+                // Here we just say that we've got peers request from remote peer
+                debug!("codec decode peers response");
+                Ok(Some(ResponseToIncoming::Peers(peers)))
+            }
+            _ => Err(io::Error::new(ErrorKind::InvalidInput, "Wrong command"))
+        }
     }
 }
 
-impl Encoder<RequestToRemote> for FromRemoteCodec {
+impl Encoder<IncomingRequest> for InCodec {
     type Error = io::Error;
 
-    fn encode(&mut self, msg: RequestToRemote, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        debug!("Encoder<RequestToRemote> for FromRemoteCodec");
+    fn encode(&mut self, msg: IncomingRequest, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        debug!("Encoder for responses for incoming requests");
+        debug!("OutgoingRequest: {:?}", msg);
         Ok(())
     }
 }

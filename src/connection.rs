@@ -7,43 +7,43 @@ use tokio::io::WriteHalf;
 use tokio::net::TcpStream;
 use tracing::{debug, info};
 use tracing::log::error;
-use crate::codec::{ToRemoteCodec, RequestToRemote, ResponseFromRemote, FromRemoteCodec, ResponseToRemote};
+use crate::codec::{OutCodec, OutgoingRequest, ResponseToOutgoing, InCodec, ResponseToIncoming, IncomingRequest};
 use crate::peer::Peer;
 
 /// Connection initiated by remote peer
-pub struct FromRemoteConnection {
+pub struct IncomingConnection {
     /// remote peer [`SocketAddr`]
     peer_addr: SocketAddr,
     /// remote peer [`Actor`] address
     peer_actor: Addr<Peer>,
     /// stream to write messages to remote peer
-    write: FramedWrite<RequestToRemote, WriteHalf<TcpStream>, FromRemoteCodec>,
+    write: FramedWrite<IncomingRequest, WriteHalf<TcpStream>, InCodec>,
 }
 
-impl Hash for FromRemoteConnection {
+impl Hash for IncomingConnection {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.peer_addr.hash(state);
     }
 }
 
-impl PartialEq for FromRemoteConnection {
+impl PartialEq for IncomingConnection {
     fn eq(&self, other: &Self) -> bool {
         self.peer_addr == other.peer_addr
     }
 }
 
-impl Eq for FromRemoteConnection {}
+impl Eq for IncomingConnection {}
 
-impl FromRemoteConnection {
+impl IncomingConnection {
     pub fn new(
         peer_addr: SocketAddr,
         peer: Addr<Peer>,
-        write: FramedWrite<RequestToRemote, WriteHalf<TcpStream>, FromRemoteCodec>) -> Self {
+        write: FramedWrite<IncomingRequest, WriteHalf<TcpStream>, InCodec>) -> Self {
         Self { peer_addr, peer_actor: peer, write }
     }
 }
 
-impl Actor for FromRemoteConnection {
+impl Actor for IncomingConnection {
     type Context = Context<Self>;
 
     // Notify peer actor about creation of new connection actor
@@ -53,16 +53,16 @@ impl Actor for FromRemoteConnection {
     }
 }
 
-impl StreamHandler<Result<ResponseFromRemote, io::Error>> for FromRemoteConnection {
-    fn handle(&mut self, item: Result<ResponseFromRemote, io::Error>, ctx: &mut Self::Context) {
+impl StreamHandler<Result<ResponseToIncoming, io::Error>> for IncomingConnection {
+    fn handle(&mut self, item: Result<ResponseToIncoming, io::Error>, ctx: &mut Self::Context) {
         match item {
             Ok(resp) => {
                 match resp {
-                    ResponseFromRemote::Peers(peers) => {
+                    ResponseToIncoming::Peers(peers) => {
                         let sent = self.peer_actor.try_send(crate::peer::AddPeers(peers));
                         debug!("peers sent from conn to peer : {:?}", sent);
                     }
-                    ResponseFromRemote::Empty => { debug!("got empty response"); }
+                    ResponseToIncoming::Empty => { debug!("got empty response"); }
                 }
             }
             Err(err) => {
@@ -73,61 +73,60 @@ impl StreamHandler<Result<ResponseFromRemote, io::Error>> for FromRemoteConnecti
     }
 }
 
-impl Handler<RequestToRemote> for FromRemoteConnection {
+impl Handler<IncomingRequest> for IncomingConnection {
     type Result = ();
 
-    fn handle(&mut self, msg: RequestToRemote, _ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: IncomingRequest, _ctx: &mut Self::Context) -> Self::Result {
         debug!("Handler<Request> for Connection");
         match msg {
-            RequestToRemote::RandomMessage(msg, addr) => {
+            IncomingRequest::RandomMessage(msg, addr) => {
                 info!("sending message [{}] to [{}]", &msg, self.peer_addr);
-                self.write.write(RequestToRemote::RandomMessage(msg, addr))
+                self.write.write(IncomingRequest::RandomMessage(msg, addr))
             },
-            // TODO matching
-            RequestToRemote::PeersRequest => {
+            IncomingRequest::PeersRequest => {
                 debug!("msg PeersRequest has sent to initial peer");
-                self.write.write(RequestToRemote::PeersRequest)
+                self.write.write(IncomingRequest::PeersRequest)
             },
         }
     }
 }
 
-impl WriteHandler<std::io::Error> for FromRemoteConnection {}
+impl WriteHandler<std::io::Error> for IncomingConnection {}
 
 /// Connection initiated by current peer
-pub struct ToRemoteConnection {
+pub struct OutgoingConnection {
     /// remote peer [`SocketAddr`]
     peer_addr: SocketAddr,
     /// remote peer [`Actor`] address
     peer_actor: Addr<Peer>,
     /// stream to write messages to remote peer
-    write: FramedWrite<RequestToRemote, WriteHalf<TcpStream>, ToRemoteCodec>,
+    write: FramedWrite<OutgoingRequest, WriteHalf<TcpStream>, OutCodec>,
 }
 
-impl Hash for ToRemoteConnection {
+impl Hash for OutgoingConnection {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.peer_addr.hash(state);
     }
 }
 
-impl PartialEq for ToRemoteConnection {
+impl PartialEq for OutgoingConnection {
     fn eq(&self, other: &Self) -> bool {
         self.peer_addr == other.peer_addr
     }
 }
 
-impl Eq for ToRemoteConnection {}
+impl Eq for OutgoingConnection {}
 
-impl ToRemoteConnection {
+impl OutgoingConnection {
     pub fn new(
         peer_addr: SocketAddr,
         peer: Addr<Peer>,
-        write: FramedWrite<RequestToRemote, WriteHalf<TcpStream>, ToRemoteCodec>) -> Self {
+        write: FramedWrite<OutgoingRequest, WriteHalf<TcpStream>, OutCodec>) -> Self {
         Self { peer_addr, peer_actor: peer, write }
     }
 }
 
-impl Actor for ToRemoteConnection {
+impl Actor for OutgoingConnection {
     type Context = Context<Self>;
 
     // Notify peer actor about creation of new connection actor
@@ -137,16 +136,16 @@ impl Actor for ToRemoteConnection {
     }
 }
 
-impl StreamHandler<Result<ResponseToRemote, io::Error>> for ToRemoteConnection {
-    fn handle(&mut self, item: Result<ResponseToRemote, io::Error>, ctx: &mut Self::Context) {
+impl StreamHandler<Result<ResponseToOutgoing, io::Error>> for OutgoingConnection {
+    fn handle(&mut self, item: Result<ResponseToOutgoing, io::Error>, ctx: &mut Self::Context) {
         match item {
             Ok(resp) => {
                 match resp {
-                    ResponseToRemote::Peers(peers) => {
+                    ResponseToOutgoing::Peers(peers) => {
                         let sent = self.peer_actor.try_send(crate::peer::AddPeers(peers));
                         debug!("peers sent from conn to peer : {:?}", sent);
                     }
-                    ResponseToRemote::Empty => { debug!("got empty response"); }
+                    ResponseToOutgoing::Empty => { debug!("got empty response"); }
                 }
             }
             Err(err) => {
@@ -157,23 +156,22 @@ impl StreamHandler<Result<ResponseToRemote, io::Error>> for ToRemoteConnection {
     }
 }
 
-impl Handler<RequestToRemote> for ToRemoteConnection {
+impl Handler<OutgoingRequest> for OutgoingConnection {
     type Result = ();
 
-    fn handle(&mut self, msg: RequestToRemote, _ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: OutgoingRequest, _ctx: &mut Self::Context) -> Self::Result {
         debug!("Handler<Request> for Connection");
         match msg {
-            RequestToRemote::RandomMessage(msg, addr) => {
+            OutgoingRequest::RandomMessage(msg, addr) => {
                 info!("sending message [{}] to [{}]", &msg, self.peer_addr);
-                self.write.write(RequestToRemote::RandomMessage(msg, addr))
+                self.write.write(OutgoingRequest::RandomMessage(msg, addr))
             },
-            // TODO matching
-            RequestToRemote::PeersRequest => {
+            OutgoingRequest::PeersRequest => {
                 debug!("msg PeersRequest has sent to initial peer");
-                self.write.write(RequestToRemote::PeersRequest)
+                self.write.write(OutgoingRequest::PeersRequest)
             },
         }
     }
 }
 
-impl WriteHandler<std::io::Error> for ToRemoteConnection {}
+impl WriteHandler<std::io::Error> for OutgoingConnection {}
