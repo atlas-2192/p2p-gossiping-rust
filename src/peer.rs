@@ -18,8 +18,8 @@ use tracing::{debug, info, warn};
 use tracing::field::debug;
 use tracing::log::error;
 use uuid::Uuid;
-use crate::codec::{Request, Response, P2PCodec};
-use crate::connection::P2PConnection;
+use crate::codec::{RequestToRemote, ResponseFromRemote, ToRemoteCodec};
+use crate::connection::{FromRemoteConnection, ToRemoteConnection};
 
 pub struct Peer {
     /// address being listened by peer
@@ -30,8 +30,17 @@ pub struct Peer {
     connect_to: Option<SocketAddr>,
     /// peers to connect and to respond other peers
     peers: HashSet<SocketAddr>,
-    /// established connections (actors to send messages)
-    connections: HashSet<Addr<P2PConnection>>,
+    // /// established connections (actors to send messages)
+    // from_connections: HashSet<Addr<FromRemoteConnection>>,
+    // /// established connections (actors to send messages)
+    // to_connections: HashSet<Addr<ToRemoteConnection>>,
+    connections: HashSet<Connection>,
+}
+
+#[derive(Eq, Hash, PartialEq)]
+pub enum Connection {
+    FromRemote(Addr<FromRemoteConnection>),
+    ToRemote(Addr<ToRemoteConnection>),
 }
 
 /// Peer running on the current process or host
@@ -45,7 +54,8 @@ impl Peer {
             period,
             connect_to,
             peers: Default::default(),
-            connections: Default::default()
+            //from_connections: Default::default()
+            connections: Default::default(),
         }
     }
 
@@ -57,12 +67,12 @@ impl Peer {
             while let Ok((stream, addr)) = listener.accept().await {
                 debug!("peer [{addr}] connected");
                 let peer = peer_addr.clone();
-                P2PConnection::create(|ctx| {
+                FromRemoteConnection::create(|ctx| {
                     let (r, w) = split(stream);
                     // reading from remote peer connection
-                    P2PConnection::add_stream(FramedRead::new(r, P2PCodec), ctx);
+                    FromRemoteConnection::add_stream(FramedRead::new(r, ToRemoteCodec), ctx);
                     // writing to remote peer connection
-                    P2PConnection::new(addr, peer, FramedWrite::new(w, P2PCodec, ctx))
+                    FromRemoteConnection::new(addr, peer, FramedWrite::new(w, ToRemoteCodec, ctx))
                 });
             }
         });
@@ -97,18 +107,18 @@ impl Actor for Peer {
                 let stream = res.unwrap();
                 let socket_addr = stream.peer_addr().unwrap();
                 let (r, w) = split(stream);
-                let initial_peer = P2PConnection::create(|ctx| {
-                    P2PConnection::add_stream(FramedRead::new(r, P2PCodec), ctx);
-                    P2PConnection::new(
+                let initial_peer = FromRemoteConnection::create(|ctx| {
+                    FromRemoteConnection::add_stream(FramedRead::new(r, ToRemoteCodec), ctx);
+                    FromRemoteConnection::new(
                         socket_addr,
                         peer_ctx_address,
-                        FramedWrite::new(w, P2PCodec, ctx))
+                        FramedWrite::new(w, ToRemoteCodec, ctx))
                 });
 
                 //Ok(initial_peer)
 
                 // request all the other peers
-                let res = initial_peer.try_send(Request::PeersRequest);
+                let res = initial_peer.try_send(RequestToRemote::PeersRequest);
             })
         );
 
@@ -140,14 +150,27 @@ impl Actor for Peer {
 
 #[derive(Debug, Message)]
 #[rtype(result = "()")]
-pub(crate) struct AddConnection(pub(crate) Addr<P2PConnection>);
+pub(crate) struct AddFromRemoteConnection(pub(crate) Addr<FromRemoteConnection>);
 
-impl Handler<AddConnection> for Peer {
+impl Handler<AddFromRemoteConnection> for Peer {
     type Result = ();
 
-    fn handle(&mut self, msg: AddConnection, _ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: AddFromRemoteConnection, _ctx: &mut Self::Context) -> Self::Result {
         debug!("connection {:?} added to peer's connections", &msg.0);
-        let _ = self.connections.insert(msg.0);
+        let _ = self.connections.insert(Connection::FromRemote(msg.0));
+    }
+}
+
+#[derive(Debug, Message)]
+#[rtype(result = "()")]
+pub(crate) struct AddToRemoteConnection(pub(crate) Addr<ToRemoteConnection>);
+
+impl Handler<AddToRemoteConnection> for Peer {
+    type Result = ();
+
+    fn handle(&mut self, msg: AddToRemoteConnection, _ctx: &mut Self::Context) -> Self::Result {
+        debug!("connection {:?} added to peer's connections", &msg.0);
+        let _ = self.connections.insert(Connection::ToRemote(msg.0));
     }
 }
 
@@ -187,10 +210,10 @@ impl Handler<ConnectPeers> for Peer {
             for peer in peers.iter() {
                 let stream = TcpStream::connect(peer).await;
                 if let Ok(stream) = stream {
-                    P2PConnection::create(|ctx| {
+                    FromRemoteConnection::create(|ctx| {
                         let (r, w) = split(stream);
-                        P2PConnection::add_stream(FramedRead::new(r, P2PCodec), ctx);
-                        P2PConnection::new(*peer, peer_addr.clone(), FramedWrite::new(w, P2PCodec, ctx))
+                        FromRemoteConnection::add_stream(FramedRead::new(r, ToRemoteCodec), ctx);
+                        FromRemoteConnection::new(*peer, peer_addr.clone(), FramedWrite::new(w, ToRemoteCodec, ctx))
                     });
                 } else {
                     warn!("couldn't establish connection with peer: {peer}");
@@ -224,9 +247,9 @@ impl Handler<GetPeers> for Peer {
 
 #[derive(Message)]
 #[rtype(result = "()")]
-struct AddStreamToConnection(P2PConnection);
+struct AddStreamToConnection(FromRemoteConnection);
 
-impl Handler<AddStreamToConnection> for P2PConnection {
+impl Handler<AddStreamToConnection> for FromRemoteConnection {
     type Result = ();
 
     fn handle(&mut self, msg: AddStreamToConnection, ctx: &mut Self::Context) -> Self::Result {
@@ -234,7 +257,6 @@ impl Handler<AddStreamToConnection> for P2PConnection {
         conn.start();
     }
 }
-
 
 fn gen_rnd_msg() -> String {
     use random_word::Lang;
