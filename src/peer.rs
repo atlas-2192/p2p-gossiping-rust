@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 use tracing::field::debug;
 use tracing::log::error;
 use uuid::Uuid;
-use crate::codec::{RequestToRemote, ResponseFromRemote, ToRemoteCodec};
+use crate::codec::{FromRemoteCodec, RequestToRemote, ResponseFromRemote, ToRemoteCodec};
 use crate::connection::{FromRemoteConnection, ToRemoteConnection};
 
 pub struct Peer {
@@ -70,9 +70,9 @@ impl Peer {
                 FromRemoteConnection::create(|ctx| {
                     let (r, w) = split(stream);
                     // reading from remote peer connection
-                    FromRemoteConnection::add_stream(FramedRead::new(r, ToRemoteCodec), ctx);
+                    FromRemoteConnection::add_stream(FramedRead::new(r, FromRemoteCodec), ctx);
                     // writing to remote peer connection
-                    FromRemoteConnection::new(addr, peer, FramedWrite::new(w, ToRemoteCodec, ctx))
+                    FromRemoteConnection::new(addr, peer, FramedWrite::new(w, FromRemoteCodec, ctx))
                 });
             }
         });
@@ -107,9 +107,9 @@ impl Actor for Peer {
                 let stream = res.unwrap();
                 let socket_addr = stream.peer_addr().unwrap();
                 let (r, w) = split(stream);
-                let initial_peer = FromRemoteConnection::create(|ctx| {
-                    FromRemoteConnection::add_stream(FramedRead::new(r, ToRemoteCodec), ctx);
-                    FromRemoteConnection::new(
+                let initial_peer = ToRemoteConnection::create(|ctx| {
+                    ToRemoteConnection::add_stream(FramedRead::new(r, ToRemoteCodec), ctx);
+                    ToRemoteConnection::new(
                         socket_addr,
                         peer_ctx_address,
                         FramedWrite::new(w, ToRemoteCodec, ctx))
@@ -210,10 +210,10 @@ impl Handler<ConnectPeers> for Peer {
             for peer in peers.iter() {
                 let stream = TcpStream::connect(peer).await;
                 if let Ok(stream) = stream {
-                    FromRemoteConnection::create(|ctx| {
+                    ToRemoteConnection::create(|ctx| {
                         let (r, w) = split(stream);
-                        FromRemoteConnection::add_stream(FramedRead::new(r, ToRemoteCodec), ctx);
-                        FromRemoteConnection::new(*peer, peer_addr.clone(), FramedWrite::new(w, ToRemoteCodec, ctx))
+                        ToRemoteConnection::add_stream(FramedRead::new(r, ToRemoteCodec), ctx);
+                        ToRemoteConnection::new(*peer, peer_addr.clone(), FramedWrite::new(w, ToRemoteCodec, ctx))
                     });
                 } else {
                     warn!("couldn't establish connection with peer: {peer}");
