@@ -119,7 +119,7 @@ pub enum Response {
 // pub struct Peers (pub HashSet<SocketAddr>);
 
 pub fn deserialize_data<'a, DATA: serde::de::Deserialize<'a>>(bytes:  &'a [u8])
-    -> Result<DATA, io::Error>
+                                                              -> Result<DATA, io::Error>
 {
     let data = DefaultOptions::new()
         .with_varint_encoding()
@@ -190,4 +190,5 @@ pub fn deserialize_data<'a, DATA: serde::de::Deserialize<'a>>(bytes:  &'a [u8])
 //         Ok(())
 //     }
 // }
+
 

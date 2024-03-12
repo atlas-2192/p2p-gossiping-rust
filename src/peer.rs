@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use actix::dev::MessageResponse;
 use actix::io::{FramedWrite, WriteHandler};
 use actix_rt::spawn;
 use actix::prelude::*;
@@ -83,6 +84,7 @@ impl Actor for Peer {
         let connect_to = self.connect_to.unwrap();
         let peer_ctx_address = peer_ctx.address().clone();
         info!("Peer has started on [{}]. Trying to connect [{connect_to}]", self.socket_addr);
+
         peer_ctx.wait(async move {
             TcpStream::connect(connect_to).await
         }
@@ -102,6 +104,7 @@ impl Actor for Peer {
                         peer_ctx_address,
                         FramedWrite::new(w, P2PCodec, ctx))
                 });
+
                 //Ok(initial_peer)
 
                 // request all the other peers
@@ -110,22 +113,29 @@ impl Actor for Peer {
             })
         );
 
+        debug!("is waiting : {}", peer_ctx.waiting());
+        debug!("peer ctx state : {:?}", peer_ctx.state());
+
         // start sending messages with specified [`period`]
         let period = self.period.clone();
         // TODO check if removed peers are being removed while loop processing
         // + is it ok to clone() sender in Addr<> ?
         //let peers = self.connections.clone();
         let socket_addr = self.socket_addr.clone();
-        peer_ctx.spawn(async {
-            let msg = gen_rnd_msg();
-            loop {
-                //tokio::time::sleep(period).await;
-                // peers.scan(|conn| {
-                //     let _ = conn.peer.send(Request::RandomMessage(Message{msg: msg.clone(), from: socket_addr }));
-                // });
-            }
-        }
-            .into_actor(self));
+        // peer_ctx.spawn(async {
+        //     let msg = gen_rnd_msg();
+        //     loop {
+        //         //tokio::time::sleep(period).await;
+        //         // peers.scan(|conn| {
+        //         //     let _ = conn.peer.send(Request::RandomMessage(Message{msg: msg.clone(), from: socket_addr }));
+        //         // });
+        //     }
+        // }
+        //     .into_actor(self));
+    }
+
+    fn stopped(&mut self, ctx: &mut Self::Context) {
+        todo!()
     }
 }
 
@@ -133,7 +143,7 @@ impl Actor for Peer {
 #[rtype(result = "()")]
 pub(crate) struct AddConnection(pub(crate) Addr<P2PConnection>);
 
- impl Handler<AddConnection> for Peer {
+impl Handler<AddConnection> for Peer {
     type Result = ();
 
     fn handle(&mut self, msg: AddConnection, _ctx: &mut Self::Context) -> Self::Result {
@@ -213,53 +223,22 @@ impl Handler<GetPeers> for Peer {
     }
 }
 
+#[derive(Message)]
+#[rtype(result = "()")]
+struct AddStreamToConnection(P2PConnection);
+
+impl Handler<AddStreamToConnection> for P2PConnection {
+    type Result = ();
+
+    fn handle(&mut self, msg: AddStreamToConnection, ctx: &mut Self::Context) -> Self::Result {
+        let conn = msg.0;
+        conn.start();
+    }
+}
+
 
 fn gen_rnd_msg() -> String {
     use random_word::Lang;
     let msg = random_word::gen(Lang::En);
     String::from(msg)
 }
-
-// impl StreamHandler<Result<ResponseToRemote, io::Error>> for LocalToRemoteConnection {
-//
-//     fn handle(&mut self, item: Result<ResponseToRemote, io::Error>, ctx: &mut Self::Context) {
-//         todo!()
-//     }
-// }
-
-//impl Handler<RequestToRemote> for LocalToRemoteConnection {
-//     type Result = ();
-//
-//     fn handle(&mut self, msg: RequestToRemote, ctx: &mut Self::Context) -> Self::Result {
-//         todo!()
-//     }
-// }
-// impl WriteHandler<std::io::Error> for LocalToRemoteConnection {}
-
-
-///// Connection with remote peer initiated by local peer
-// pub struct LocalToRemoteConnection {
-//     /// remote peer [`SocketAddr`]
-//     peer_addr: SocketAddr,
-//     /// remote peer [`Actor`] address
-//     remote_peer: Addr<Peer>,
-//     /// stream to write messages to remote peer
-//     write: FramedWrite<RequestToRemote, WriteHalf<TcpStream>, LocalToRemoteCodec>,
-// }
-//
-// impl LocalToRemoteConnection {
-//     pub fn new(
-//         peer_addr: SocketAddr,
-//         peer: Addr<Peer>,
-//         write: FramedWrite<RequestToRemote, WriteHalf<TcpStream>, LocalToRemoteCodec>) -> Self {
-//         Self { peer_addr, remote_peer: peer, write }
-//     }
-// }
-//
-// impl Actor for LocalToRemoteConnection {
-//     type Context = Context<Self>;
-//
-//     fn started(&mut self, ctx: &mut Self::Context) {
-//         todo!()
-//     }
-// }
