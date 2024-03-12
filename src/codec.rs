@@ -9,13 +9,17 @@ use bytes::{Buf, BufMut, BytesMut};
 use actix_codec::{Decoder, Encoder};
 use tracing::{debug, info};
 
+pub trait Codec {}
 
-/// Codec for peer -> remote peer half
-pub struct PeerConnectionCodec;
+impl Codec for RemoteToLocalCodec {}
 
-/// Implement decoder trait for P2P
-impl Decoder for PeerConnectionCodec {
-    type Item = Response;
+impl Codec for LocalToRemoteCodec {}
+
+/// Codec for [`crate::peer::RemoteToLocalConnection`]
+pub struct RemoteToLocalCodec;
+
+impl Decoder for RemoteToLocalCodec {
+    type Item = ResponseFromRemote;
     type Error = io::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
@@ -32,24 +36,24 @@ impl Decoder for PeerConnectionCodec {
                 let msg = String::from_utf8(msg_buf)
                     .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "Invalid utf8"))?;
                 debug!("Received message [{}]", &msg);
-                Ok(Some(Response::Message(msg)))
+                Ok(Some(ResponseFromRemote::Peers(Peers(Default::default()))))
             }
             1 => {
                 debug!("Response peers", );
-                Ok(Some(Response::Peers(Peers(Default::default()))))
+                Ok(Some(ResponseFromRemote::Peers(Peers(Default::default()))))
             }
             _ => Err(io::Error::new(ErrorKind::InvalidInput, "Wrong command"))
         }
     }
 }
 
-impl Encoder<Request> for PeerConnectionCodec {
+impl Encoder<RequestToRemote> for RemoteToLocalCodec {
 
     type Error = io::Error;
 
-    fn encode(&mut self, item: Request, dst: &mut BytesMut) -> Result<(), Self::Error> {
+    fn encode(&mut self, item: RequestToRemote, dst: &mut BytesMut) -> Result<(), Self::Error> {
         match item {
-            Request::RandomMessage(msg) => {
+            RequestToRemote::RandomMessage(msg) => {
                 let cmd_buf = [0u8; 1];
                 let mut writer = dst.writer();
                 let written = writer.write(&cmd_buf)?;
@@ -57,7 +61,7 @@ impl Encoder<Request> for PeerConnectionCodec {
                 writer.write_all(msg.msg.as_bytes())?;
                 Ok(())
             }
-            Request::PeersRequest(_req) => {
+            RequestToRemote::PeersRequest(_req) => {
                 let cmd_buf = [1u8; 1];
                 let mut writer = dst.writer();
                 let written = writer.write(&cmd_buf)?;
@@ -66,14 +70,44 @@ impl Encoder<Request> for PeerConnectionCodec {
             }
         }
     }
-
 }
 
+impl Encoder<RequestFromRemote> for RemoteToLocalCodec {
+    type Error = io::Error;
+
+    fn encode(&mut self, item: RequestFromRemote, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        todo!()
+    }
+}
+
+/// Request to remote peer
 #[derive(Debug, Message)]
 #[rtype(result = "()")]
-pub enum Request {
+pub enum RequestToRemote {
     RandomMessage(Message),
     PeersRequest(PeersRequest),
+}
+
+/// Remote peer response
+#[derive(Debug, Message)]
+#[rtype(result = "()")]
+pub enum ResponseFromRemote {
+    Peers(Peers),
+}
+
+/// request from remote peer to local peer
+#[derive(Debug, Message)]
+#[rtype(result = "()")]
+pub enum RequestFromRemote {
+    RandomMessage(Message),
+    PeersRequest(PeersRequest),
+}
+
+/// response from local peer to remote peer
+#[derive(Debug, Message)]
+#[rtype(result = "()")]
+pub enum ResponseToRemote {
+    Peers(Peers),
 }
 
 #[derive(Debug, Message)]
@@ -87,13 +121,10 @@ pub struct Message {
 #[rtype(result = "Result<Peers, io::Error>")]
 pub struct PeersRequest;
 
-/// Remote peer response
 #[derive(Debug, Message)]
 #[rtype(result = "()")]
-pub enum Response {
-    Peers(Peers),
-    // TODO from
-    Message(String)
+pub enum LocalResponse {
+    Peers(Peers)
 }
 
 #[derive(Debug, Message)]
@@ -101,11 +132,11 @@ pub enum Response {
 pub struct Peers (pub HashSet<SocketAddr>);
 
 
-/// Codec for remote peer -> peer half
-pub struct RemotePeerConnectionCodec;
+/// Codec for [`crate::peer::LocalToRemoteConnection`]
+pub struct LocalToRemoteCodec;
 
-impl Decoder for RemotePeerConnectionCodec {
-    type Item = Request;
+impl Decoder for LocalToRemoteCodec {
+    type Item = ResponseToRemote;
     type Error = io::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
@@ -113,10 +144,10 @@ impl Decoder for RemotePeerConnectionCodec {
     }
 }
 
-impl Encoder<Response> for RemotePeerConnectionCodec {
+impl Encoder<RequestToRemote> for LocalToRemoteCodec {
     type Error = io::Error;
 
-    fn encode(&mut self, msg: Response, dst: &mut BytesMut) -> Result<(), Self::Error> {
+    fn encode(&mut self, msg: RequestToRemote, dst: &mut BytesMut) -> Result<(), Self::Error> {
         Ok(())
     }
 }
