@@ -74,6 +74,12 @@ impl Encoder<Request> for P2PCodec {
                 let cmd_buf = [1u8; 1];
                 let mut writer = dst.writer();
                 writer.write_all(&cmd_buf)?;
+                // TEST
+                // error: Slice had bytes remaining after deserialization
+                // let byte_buf = bincode::serialize::<HashSet<SocketAddr>>(&HashSet::new()).unwrap();
+                // let len = byte_buf.len() as u32;
+                // writer.write_u32::<BigEndian>(len)?;
+                // writer.write_all(&byte_buf)?;
                 Ok(())
             }
         }
@@ -100,24 +106,6 @@ pub enum Response {
     Empty,
 }
 
-/// Message sent to all the peers in network
-// #[derive(Debug, Message, Clone, Serialize, Deserialize)]
-// #[rtype(result = "()")]
-// pub struct Message {
-//     pub msg: String,
-//     /// In order to simplify remote peer recognition
-//     /// TODO change 127.0.0.1:54323 -> 127.0.0.1:8080
-//     pub from: SocketAddr,
-// }
-//
-// #[derive(Debug, Message, Clone)]
-// #[rtype(result = "Result<Peers, io::Error>")]
-// pub struct PeersRequest;
-//
-// #[derive(Debug, Message)]
-// #[rtype(result = "()")]
-// pub struct Peers (pub HashSet<SocketAddr>);
-
 pub fn deserialize_data<'a, DATA: serde::de::Deserialize<'a>>(bytes:  &'a [u8])
                                                               -> Result<DATA, io::Error>
 {
@@ -134,61 +122,61 @@ pub fn deserialize_data<'a, DATA: serde::de::Deserialize<'a>>(bytes:  &'a [u8])
 }
 
 
-// /// Request to remote peer
-// #[derive(Debug, Message)]
-// #[rtype(result = "()")]
-// pub enum RequestToRemote {
-//     RandomMessage(Message),
-//     PeersRequest(PeersRequest),
-// }
-//
-// /// Remote peer response
-// #[derive(Debug, Message)]
-// #[rtype(result = "()")]
-// pub enum ResponseFromRemote {
-//     Peers(Peers),
-// }
-//
-// /// request from remote peer to local peer
-// #[derive(Debug, Message)]
-// #[rtype(result = "()")]
-// pub enum RequestFromRemote {
-//     RandomMessage(Message),
-//     PeersRequest(PeersRequest),
-// }
-//
-// /// response from local peer to remote peer
-// #[derive(Debug, Message)]
-// #[rtype(result = "()")]
-// pub enum ResponseToRemote {
-//     Peers(Peers),
-// }
+/// Request to remote peer
+#[derive(Debug, Message)]
+#[rtype(result = "()")]
+pub enum RequestToRemote {
+    RandomMessage(Message),
+    PeersRequest(PeersRequest),
+}
 
-// #[derive(Debug, Message)]
-// #[rtype(result = "()")]
-// pub enum LocalResponse {
-//     Peers(Peers)
-// }
+/// Remote peer response
+#[derive(Debug, Message)]
+#[rtype(result = "()")]
+pub enum ResponseFromRemote {
+    Peers(Peers),
+}
+
+/// request from remote peer to local peer
+#[derive(Debug, Message)]
+#[rtype(result = "()")]
+pub enum RequestFromRemote {
+    RandomMessage(Message),
+    PeersRequest(PeersRequest),
+}
+
+/// response from local peer to remote peer
+#[derive(Debug, Message)]
+#[rtype(result = "()")]
+pub enum ResponseToRemote {
+    Peers(Peers),
+}
+
+#[derive(Debug, Message)]
+#[rtype(result = "()")]
+pub enum LocalResponse {
+    Peers(Peers)
+}
 
 
-// /// Codec for [`crate::peer::LocalToRemoteConnection`]
-// pub struct LocalToRemoteCodec;
-//
-// impl Decoder for LocalToRemoteCodec {
-//     type Item = ResponseToRemote;
-//     type Error = io::Error;
-//
-//     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-//         Ok(None)
-//     }
-// }
-//
-// impl Encoder<RequestToRemote> for LocalToRemoteCodec {
-//     type Error = io::Error;
-//
-//     fn encode(&mut self, msg: RequestToRemote, dst: &mut BytesMut) -> Result<(), Self::Error> {
-//         Ok(())
-//     }
-// }
+/// Codec for [`crate::peer::LocalToRemoteConnection`]
+pub struct LocalToRemoteCodec;
+
+impl Decoder for LocalToRemoteCodec {
+    type Item = ResponseToRemote;
+    type Error = io::Error;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        Ok(None)
+    }
+}
+
+impl Encoder<RequestToRemote> for LocalToRemoteCodec {
+    type Error = io::Error;
+
+    fn encode(&mut self, msg: RequestToRemote, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
 
 

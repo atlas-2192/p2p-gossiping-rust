@@ -85,7 +85,7 @@ impl Actor for Peer {
         let peer_ctx_address = peer_ctx.address().clone();
         info!("Peer has started on [{}]. Trying to connect [{connect_to}]", self.socket_addr);
 
-        peer_ctx.wait(async move {
+        peer_ctx.spawn(async move {
             TcpStream::connect(connect_to).await
         }
             .into_actor(self)
@@ -109,7 +109,6 @@ impl Actor for Peer {
 
                 // request all the other peers
                 let res = initial_peer.try_send(Request::PeersRequest);
-                debug!("res: {:?}", res);
             })
         );
 

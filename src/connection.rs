@@ -50,14 +50,6 @@ impl Actor for P2PConnection {
     fn started(&mut self, ctx: &mut Self::Context) {
         let addr = ctx.address();
         let added = self.peer_actor.try_send(crate::peer::AddConnection(addr));
-        debug!("new actor `connection` started: {:?}", added);
-    }
-
-    fn create<F>(f: F) -> Addr<Self> where Self: Actor<Context=Context<Self>>, F: FnOnce(&mut Context<Self>) -> Self {
-        let mut ctx = Context::new();
-        let act = f(&mut ctx);
-        debug!("new actor `connection` created");
-        ctx.run(act)
     }
 }
 
