@@ -1,6 +1,7 @@
 mod peer;
 mod codec;
 mod connection;
+pub(crate) mod message;
 
 use std::io;
 use std::net::SocketAddr;

@@ -17,9 +17,11 @@ use tokio_util::codec::FramedRead;
 use tracing::{debug, info, warn};
 use tracing::field::debug;
 use tracing::log::error;
-use uuid::Uuid;
-use crate::codec::{InCodec, OutgoingRequest, ResponseToOutgoing, OutCodec, IncomingRequest};
+use crate::codec::{InCodec, OutCodec};
 use crate::connection::{IncomingConnection, OutgoingConnection};
+use crate::message::actor::ActorRequest;
+use crate::message::OutMessage;
+use crate::message::Request::PeersRequest;
 
 pub struct Peer {
     /// address being listened by peer
@@ -115,10 +117,8 @@ impl Actor for Peer {
                         FramedWrite::new(w, OutCodec, ctx))
                 });
 
-                //Ok(initial_peer)
-
                 // request all the other peers
-                let res = initial_peer.try_send(OutgoingRequest::PeersRequest);
+                let res = initial_peer.try_send(OutMessage::Request(PeersRequest));
             })
         );
 
@@ -142,10 +142,6 @@ impl Actor for Peer {
         // }
         //     .into_actor(self));
     }
-
-    fn stopped(&mut self, ctx: &mut Self::Context) {
-        todo!()
-    }
 }
 
 #[derive(Debug, Message)]
@@ -156,7 +152,6 @@ impl Handler<AddFromRemoteConnection> for Peer {
     type Result = ();
 
     fn handle(&mut self, msg: AddFromRemoteConnection, _ctx: &mut Self::Context) -> Self::Result {
-        debug!("connection {:?} added to peer's connections", &msg.0);
         let _ = self.connections.insert(Connection::FromRemote(msg.0));
     }
 }
@@ -169,7 +164,6 @@ impl Handler<AddToRemoteConnection> for Peer {
     type Result = ();
 
     fn handle(&mut self, msg: AddToRemoteConnection, _ctx: &mut Self::Context) -> Self::Result {
-        debug!("connection {:?} added to peer's connections", &msg.0);
         let _ = self.connections.insert(Connection::ToRemote(msg.0));
     }
 }
@@ -232,31 +226,35 @@ impl Handler<ConnectPeers> for Peer {
 }
 
 #[derive(Debug, Message)]
-#[rtype(result = "PeersResponse")]
-struct GetPeers;
+#[rtype(result = "HashSet<SocketAddr>")]
+pub(crate) struct GetPeers;
 
-struct PeersResponse(HashSet<SocketAddr>);
+#[derive(Debug, Message)]
+#[rtype(result = "HashSet<SocketAddr>")]
+pub(crate) struct PeersResponse(HashSet<SocketAddr>);
 
 impl Handler<GetPeers> for Peer {
     type Result = MessageResult<GetPeers>;
 
     fn handle(&mut self, _msg: GetPeers, _ctx: &mut Self::Context) -> Self::Result {
-        MessageResult(PeersResponse(self.peers.clone()))
+        let mut peers = self.peers.clone();
+        peers.insert(self.socket_addr);
+        MessageResult(peers)
     }
 }
-
-#[derive(Message)]
-#[rtype(result = "()")]
-struct AddStreamToConnection(IncomingConnection);
-
-impl Handler<AddStreamToConnection> for IncomingConnection {
-    type Result = ();
-
-    fn handle(&mut self, msg: AddStreamToConnection, ctx: &mut Self::Context) -> Self::Result {
-        let conn = msg.0;
-        conn.start();
-    }
-}
+//
+// #[derive(Message)]
+// #[rtype(result = "()")]
+// struct AddStreamToConnection(IncomingConnection);
+//
+// impl Handler<AddStreamToConnection> for IncomingConnection {
+//     type Result = ();
+//
+//     fn handle(&mut self, msg: AddStreamToConnection, ctx: &mut Self::Context) -> Self::Result {
+//         let conn = msg.0;
+//         conn.start();
+//     }
+// }
 
 fn gen_rnd_msg() -> String {
     use random_word::Lang;
