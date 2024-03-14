@@ -20,7 +20,10 @@ pub enum InMessage {
 #[rtype(result = "()")]
 pub enum Response {
     PeersResponse(HashSet<SocketAddr>),
+    // TODO
     MessageResponse(String, SocketAddr),
+    /// Result of handshake
+    Handshake(bool),
 }
 
 #[derive(Debug, Message)]
@@ -28,8 +31,10 @@ pub enum Response {
 pub enum Request {
     /// (random message, sender)
     MessageRequest(String, SocketAddr),
-    /// request for all active peers in network
+    /// request for all active peers in network.
     PeersRequest,
+    /// Send self address to remote peer for connection
+    Handshake(SocketAddr),
 }
 
 pub mod actor {

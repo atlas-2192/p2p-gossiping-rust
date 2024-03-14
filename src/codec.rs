@@ -11,7 +11,7 @@ use actix_codec::{Decoder, Encoder};
 use bincode::{DefaultOptions, Options};
 use bytes::buf::{Reader, Writer};
 use serde_derive::{Deserialize, Serialize};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use crate::message::{InMessage, OutMessage};
 use crate::message::Request::{MessageRequest, PeersRequest};
 use crate::message::Response::{MessageResponse, PeersResponse};
@@ -20,19 +20,19 @@ use crate::message::Response::{MessageResponse, PeersResponse};
 ///
 /// Peer1 [`crate::peer::Peer`] actor, request [`ActorRequest`]
 ///         ->
-/// Peer1 [`crate::connection::OutgoingConnection`] actor, request [`OutgoingNetworkRequest`]
+/// Peer1 [`crate::connection::OutConnection`] actor, request [`OutgoingNetworkRequest`]
 ///         ->
-/// Peer2 [`crate::connection::IncomingConnection`] actor, request [`InMessage`]
+/// Peer2 [`crate::connection::InConnection`] actor, request [`InMessage`]
 ///         ->
 /// Peer2 [`crate::peer::Peer`] actor, response [`ActorRequest`]
 ///         ->
-/// Peer2 [`crate::connection::OutgoingConnection`] actor, response [`OutgoingActorResponse`]
+/// Peer2 [`crate::connection::OutConnection`] actor, response [`OutgoingActorResponse`]
 ///         ->
-/// Peer1 [`crate::connection::IncomingConnection`] actor, response [`OutMessage`]
+/// Peer1 [`crate::connection::InConnection`] actor, response [`OutMessage`]
 ///         ->
 /// Peer1 [`crate::peer::Peer`] actor
 
-/// Codec for [`crate::peer::OutgoingConnection`]
+/// Codec for [`crate::peer::OutConnection`]
 pub struct OutCodec;
 
 impl Decoder for OutCodec {
@@ -47,6 +47,10 @@ impl Decoder for OutCodec {
         debug!("impl Decoder for OutCodec received command: [{}]", &cmd_buf[0]);
         match cmd_buf[0] {
             0 => {
+                if !reader.has_data_left()? {
+                    warn!("reader has no data within a buffer");
+                    return Ok(None);
+                }
                 decode_msg(reader)
                     .map(|msg| {
                         Ok(Some(OutMessage::Response(MessageResponse(msg.msg, msg.sender))))
@@ -72,7 +76,7 @@ impl Decoder for OutCodec {
     }
 }
 
-/// Codec for [`crate::peer::IncomingConnection`]
+/// Codec for [`crate::peer::InConnection`]
 pub struct InCodec;
 
 impl Decoder for InCodec {
@@ -88,6 +92,11 @@ impl Decoder for InCodec {
         debug!("received command: [{}]", &cmd_buf[0]);
         match cmd_buf[0] {
             0 => {
+                if !reader.has_data_left()? {
+                    warn!("reader has no data within a buffer");
+                    // TODO find out why????
+                    return Ok(None);
+                }
                 decode_msg(reader)
                     .map(|msg| {
                         Ok(Some(InMessage::Response(MessageResponse(msg.msg, msg.sender))))
@@ -132,6 +141,7 @@ impl Encoder<InMessage> for InCodec {
             InMessage::Response(resp) => {
                 match resp {
                     PeersResponse(peers) => {
+                        debug!("encode_and_write_peers response");
                         encode_and_write_peers(writer, &peers)?
                     }
                     MessageResponse(..) => {
@@ -187,8 +197,11 @@ impl Encoder<OutMessage> for OutCodec {
     fn encode(&mut self, item: OutMessage, dst: &mut BytesMut) -> Result<(), Self::Error> {
         debug!("impl Encoder<OutMessage> for OutCodec");
         let mut writer = dst.writer();
+        use tracing::warn;
+        warn!("item: {item:?}");
         match item {
             OutMessage::Request(req) => {
+                warn!("req: {req:?}");
                 match req {
                     MessageRequest(msg, addr) => {
                         debug!("codec encode random message");
@@ -204,6 +217,7 @@ impl Encoder<OutMessage> for OutCodec {
                 }
             }
             OutMessage::Response(resp) => {
+                warn!("resp: {resp:?}");
                 match resp {
                     PeersResponse(peers) => {
                         Ok(encode_and_write_peers(writer, &peers)?)
@@ -221,6 +235,7 @@ impl Encoder<InMessage> for OutCodec {
     type Error = io::Error;
 
     fn encode(&mut self, item: InMessage, dst: &mut BytesMut) -> Result<(), Self::Error> {
+
         todo!()
     }
 }
@@ -238,21 +253,24 @@ fn encode_and_write_msg(
     debug!("codec encode random message");
     let command = [0u8; 1];
     writer.write_all(&command)?;
-    let byte_buf = bincode::serialize::<MessageWithSender>(&msg)
-        .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "Invalid encoding"))?;
+    warn!("COMMAND [{command:?}] HAS BEEN WRITTEN TO WRITER");
+    let byte_buf = serialize_data(&msg)?;
+    debug!("byte_buf : {byte_buf:?}");
     let len = byte_buf.len() as u32;
     writer.write_u32::<BigEndian>(len)?;
     writer.write_all(&byte_buf)?;
+    debug!("byte_buf: {byte_buf:?}");
     Ok(writer.flush()?)
 }
 
 fn decode_msg(mut reader: Reader<&mut BytesMut>) -> io::Result<MessageWithSender> {
     debug!("codec decode random message");
-    let size = reader.read_u32::<BigEndian>()?;
-    let mut bytes_buf = vec![0_u8; size as usize];
+    let len = reader.read_u32::<BigEndian>()?;
+    let mut bytes_buf = vec![0_u8; len as usize];
     reader.read(&mut bytes_buf)?;
-    let payload = &bytes_buf[2..bytes_buf.len()];
-    let msg = deserialize_data(payload)?;
+    let payload = &bytes_buf[1..bytes_buf.len()];
+    debug!("byte_buf: {bytes_buf:?}");
+    let msg = deserialize_data(&payload)?;
     Ok(msg)
 }
 
@@ -260,29 +278,22 @@ fn encode_and_write_peers(
     mut writer: Writer<&mut BytesMut>,
     peers: &HashSet<SocketAddr>)
     -> io::Result<()> {
-    //debug!("codec encode peers");
     let command = [1u8; 1];
     writer.write_all(&command)?;
+    warn!("COMMAND [{command:?}] HAS BEEN WRITTEN TO WRITER");
     let byte_buf = serialize_data(&peers)?;
     let len = byte_buf.len() as u32;
-    //debug!("bytes len: {len}");
     writer.write_u32::<BigEndian>(len)?;
     writer.write_all(&byte_buf)?;
-    //debug!("peers bytes: {byte_buf:?}");
     writer.flush()?;
     Ok(())
 }
 
 fn decode_peers(mut reader: Reader<&mut BytesMut>) -> io::Result<HashSet<SocketAddr>> {
-    debug!("codec decode peer request");
     let len = reader.read_u32::<BigEndian>()?;
-    debug!("length is {len} bytes");
     let mut bytes_buf = vec![0_u8; len as usize];
     reader.read(&mut bytes_buf)?;
-    debug!("bytes: {bytes_buf:?}");
-    debug!("buffer has data left: {:?}", reader.has_data_left().unwrap());
     let peers = deserialize_data(&bytes_buf)?;
-    debug!("deserialized peers: {peers:?}");
     Ok(peers)
 }
 
@@ -301,7 +312,7 @@ fn deserialize_data<'a, DATA: serde::de::Deserialize<'a>>(bytes:  &'a [u8])
     if let Ok(data) = data {
         Ok(data)
     } else {
-        let err = format!("data deserialization error: {}",  data.err().unwrap());
+        let err = format!("deserialization error: {}",  data.err().unwrap());
         Err(io::Error::new(ErrorKind::InvalidData, err))
     }
 }

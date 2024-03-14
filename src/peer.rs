@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 use tracing::field::debug;
 use tracing::log::error;
 use crate::codec::{InCodec, OutCodec};
-use crate::connection::{IncomingConnection, OutgoingConnection};
+use crate::connection::{InConnection, OutConnection};
 use crate::message::actor::ActorRequest;
 use crate::message::OutMessage;
 use crate::message::Request::PeersRequest;
@@ -32,17 +32,14 @@ pub struct Peer {
     connect_to: Option<SocketAddr>,
     /// peers to connect and to respond other peers
     peers: HashSet<SocketAddr>,
-    // /// established connections (actors to send messages)
-    // from_connections: HashSet<Addr<FromRemoteConnection>>,
-    // /// established connections (actors to send messages)
-    // to_connections: HashSet<Addr<ToRemoteConnection>>,
+    /// established connections (actors to send messages)
     connections: HashSet<Connection>,
 }
 
 #[derive(Eq, Hash, PartialEq)]
 pub enum Connection {
-    FromRemote(Addr<IncomingConnection>),
-    ToRemote(Addr<OutgoingConnection>),
+    In(Addr<InConnection>),
+    Out(Addr<OutConnection>),
 }
 
 /// Peer running on the current process or host
@@ -69,15 +66,20 @@ impl Peer {
             while let Ok((stream, addr)) = listener.accept().await {
                 debug!("peer [{addr}] connected");
                 let peer = peer_addr.clone();
-                IncomingConnection::create(|ctx| {
+                InConnection::create(|ctx| {
                     let (r, w) = split(stream);
                     // reading from remote peer connection
-                    IncomingConnection::add_stream(FramedRead::new(r, InCodec), ctx);
+                    InConnection::add_stream(FramedRead::new(r, InCodec), ctx);
                     // writing to remote peer connection
-                    IncomingConnection::new(addr, peer, FramedWrite::new(w, InCodec, ctx))
+                    InConnection::new(addr, peer, FramedWrite::new(w, InCodec, ctx))
                 });
             }
         });
+    }
+
+    fn contains_conn(&self, addr: &SocketAddr) -> bool {
+        self.peers.iter()
+            .any(|p| p.eq(addr))
     }
 }
 
@@ -105,20 +107,21 @@ impl Actor for Peer {
                 error!("Couldn't establish connection with peer: {connect_to}, error {e}");
                 ctx.stop();
             })
-            .map(|res, _actor, _ctx| {
+            .map(|res, actor, _ctx| {
                 let stream = res.unwrap();
-                let socket_addr = stream.peer_addr().unwrap();
+                let remote_peer_addr = stream.peer_addr().unwrap();
                 let (r, w) = split(stream);
-                let initial_peer = OutgoingConnection::create(|ctx| {
-                    OutgoingConnection::add_stream(FramedRead::new(r, OutCodec), ctx);
-                    OutgoingConnection::new(
-                        socket_addr,
+                let initial_peer = OutConnection::create(|ctx| {
+                    OutConnection::add_stream(FramedRead::new(r, OutCodec), ctx);
+                    OutConnection::new(
+                        actor.socket_addr,
+                        remote_peer_addr,
                         peer_ctx_address,
                         FramedWrite::new(w, OutCodec, ctx))
                 });
 
                 // request all the other peers
-                let res = initial_peer.try_send(OutMessage::Request(PeersRequest));
+                let _ = initial_peer.try_send(OutMessage::Request(PeersRequest(actor.socket_addr)));
             })
         );
 
@@ -143,31 +146,33 @@ impl Actor for Peer {
 
 #[derive(Debug, Message)]
 #[rtype(result = "()")]
-pub(crate) struct AddFromRemoteConnection(pub(crate) Addr<IncomingConnection>);
+pub(crate) struct AddInConnection(pub Addr<InConnection>, pub SocketAddr);
 
-impl Handler<AddFromRemoteConnection> for Peer {
+impl Handler<AddInConnection> for Peer {
     type Result = ();
 
-    fn handle(&mut self, msg: AddFromRemoteConnection, _ctx: &mut Self::Context) -> Self::Result {
-        let _ = self.connections.insert(Connection::FromRemote(msg.0));
+    fn handle(&mut self, msg: AddInConnection, _ctx: &mut Self::Context) -> Self::Result {
+        let _ = self.connections.insert(Connection::In(msg.0));
+        let _ = self.peers.insert(msg.1);
     }
 }
 
 #[derive(Debug, Message)]
 #[rtype(result = "()")]
-pub(crate) struct AddToRemoteConnection(pub(crate) Addr<OutgoingConnection>);
+pub(crate) struct AddOutConnection(pub Addr<OutConnection>, pub SocketAddr);
 
-impl Handler<AddToRemoteConnection> for Peer {
+impl Handler<AddOutConnection> for Peer {
     type Result = ();
 
-    fn handle(&mut self, msg: AddToRemoteConnection, _ctx: &mut Self::Context) -> Self::Result {
-        let _ = self.connections.insert(Connection::ToRemote(msg.0));
+    fn handle(&mut self, msg: AddOutConnection, _ctx: &mut Self::Context) -> Self::Result {
+        let _ = self.connections.insert(Connection::Out(msg.0));
+        let _ = self.peers.insert(msg.1);
     }
 }
 
 #[derive(Debug, Message)]
 #[rtype(result = "()")]
-pub(crate) struct AddPeers(pub(crate) HashSet<SocketAddr>);
+pub struct AddPeers(pub(crate) HashSet<SocketAddr>);
 
 impl Handler<AddPeers> for Peer {
     type Result = ();
@@ -184,6 +189,20 @@ impl Handler<AddPeers> for Peer {
     }
 }
 
+#[derive(Debug, Message)]
+#[rtype(result = "()")]
+pub struct AddConnectedPeer(pub SocketAddr);
+
+impl Handler<AddConnectedPeer> for Peer {
+    type Result = ();
+
+    fn handle(&mut self, msg: AddConnectedPeer, ctx: &mut Self::Context) -> Self::Result {
+        if self.peers.insert(msg.0) {
+            debug!("peer [{}] has been added to peers", msg.0)
+        }
+    }
+}
+
 /// notify ourself than we need to establish connection with peers
 #[derive(Debug, Message)]
 #[rtype(result = "()")]
@@ -193,18 +212,33 @@ impl Handler<ConnectPeers> for Peer {
     type Result = ();
 
     fn handle(&mut self, msg: ConnectPeers, peer_ctx: &mut Self::Context) -> Self::Result {
-        let peer_addr = peer_ctx.address();
-        let peers = Arc::new(msg.0);
+        let peer_actor = peer_ctx.address();
+        // We don't need to add already connected peers
+        let peers_to_connect = msg.0.iter()
+            .filter_map(|to_connect| {
+                return if self.peers.iter().any(|connected| connected.eq(to_connect)) {
+                    Some(*to_connect)
+                } else { None }
+            })
+            .collect::<HashSet<SocketAddr>>();
+        
+        let peers_to_connect = Arc::new(peers_to_connect);
+        let peer_addr = self.socket_addr.clone();
+        
         peer_ctx.spawn(async move {
             // TODO define retry count
             let mut errors = HashSet::new();
-            for peer in peers.iter() {
+            for peer in peers_to_connect.iter() {
                 let stream = TcpStream::connect(peer).await;
                 if let Ok(stream) = stream {
-                    OutgoingConnection::create(|ctx| {
+                    OutConnection::create(|ctx| {
                         let (r, w) = split(stream);
-                        OutgoingConnection::add_stream(FramedRead::new(r, OutCodec), ctx);
-                        OutgoingConnection::new(*peer, peer_addr.clone(), FramedWrite::new(w, OutCodec, ctx))
+                        OutConnection::add_stream(FramedRead::new(r, OutCodec), ctx);
+                        OutConnection::new(
+                            peer_addr, 
+                            *peer, 
+                            peer_actor.clone(), 
+                            FramedWrite::new(w, OutCodec, ctx))
                     });
                 } else {
                     warn!("couldn't establish connection with peer: {peer}");
@@ -216,8 +250,10 @@ impl Handler<ConnectPeers> for Peer {
             .into_actor(self)
             .map(|errors, _actor, ctx| {
                 // Retry establishing connection later TODO wait a few seconds before this action
-                debug!("retrying to establish connection with peers: {:?} after 3 seconds", errors);
-                ctx.notify_later(ConnectPeers(errors), Duration::from_secs(3));
+                if !errors.is_empty() {
+                    debug!("retrying to establish connection with peers: {:?} after 3 seconds", errors);
+                    ctx.notify_later(ConnectPeers(errors), Duration::from_secs(3));
+                }
             }));
     }
 }
