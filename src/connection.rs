@@ -49,7 +49,7 @@ impl Handler<InMessage> for IncomingConnection {
     type Result = ();
 
     fn handle(&mut self, msg: InMessage, ctx: &mut Self::Context) -> Self::Result {
-        debug!("Handler<Request> for Connection");
+        debug!("Handler<Request> for IncomingConnection");
         match msg {
             InMessage::Request(req) => {
                 match req {
@@ -173,7 +173,7 @@ impl Actor for OutgoingConnection {
     // Notify peer actor about creation of new connection actor
     fn started(&mut self, ctx: &mut Self::Context) {
         let addr = ctx.address();
-        let added = self.peer_actor.try_send(crate::peer::AddToRemoteConnection(addr));
+        let _ = self.peer_actor.send(crate::peer::AddToRemoteConnection(addr));
     }
 }
 
@@ -181,8 +181,8 @@ impl Actor for OutgoingConnection {
 impl StreamHandler<Result<OutMessage, io::Error>> for OutgoingConnection {
     fn handle(&mut self, item: Result<OutMessage, io::Error>, ctx: &mut Self::Context) {
         match item {
-            Ok(in_msg) => {
-                match in_msg {
+            Ok(out_msg) => {
+                match out_msg {
                     OutMessage::Request(req) => {
                         match req {
                             MessageRequest(msg, sender) => {
@@ -219,7 +219,7 @@ impl StreamHandler<Result<OutMessage, io::Error>> for OutgoingConnection {
                                     })
                                     .wait(ctx);
                             }
-                            Response::MessageResponse(_, _) => {
+                            MessageResponse(_, _) => {
                                 debug!("unreachable");
                             }
                         }
@@ -239,7 +239,7 @@ impl Handler<OutMessage> for OutgoingConnection {
     type Result = ();
 
     fn handle(&mut self, msg: OutMessage, _ctx: &mut Self::Context) -> Self::Result {
-        debug!("Handler<Request> for Connection");
+        debug!("Handler<OutMessage> for OutgoingConnection");
         match msg {
             OutMessage::Request(req) => {
                 match req {
@@ -248,6 +248,7 @@ impl Handler<OutMessage> for OutgoingConnection {
                         self.write.write(OutMessage::Request(MessageRequest(msg, addr)))
                     }
                     Request::PeersRequest => {
+                        debug!("sending peer request");
                         self.write.write(OutMessage::Request(Request::PeersRequest))
                     }
                 }

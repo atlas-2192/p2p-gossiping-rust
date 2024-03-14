@@ -122,9 +122,6 @@ impl Actor for Peer {
             })
         );
 
-        debug!("is waiting : {}", peer_ctx.waiting());
-        debug!("peer ctx state : {:?}", peer_ctx.state());
-
         // start sending messages with specified [`period`]
         let period = self.period.clone();
         // TODO check if removed peers are being removed while loop processing

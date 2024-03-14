@@ -1,6 +1,6 @@
 use std::io;
 use std::collections::HashSet;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{BufRead, ErrorKind, Read, Write};
 use std::net::SocketAddr;
 use std::str::FromStr;
 
@@ -98,15 +98,7 @@ impl Decoder for InCodec {
                     })?
             }
             1 => {
-                debug!("impl Decoder for OutCodec peers response");
-                decode_peers(reader)
-                    .map(|peers| {
-                        Ok(Some(InMessage::Response(PeersResponse(peers))))
-                    })
-                    .map_err(|e| {
-                        error!("decode_peers error : {e:?}");
-                        io::Error::new(ErrorKind::InvalidInput, "Decode error")
-                    })?
+                Ok(Some(InMessage::Request(PeersRequest)))
             }
             _ => Err(io::Error::new(ErrorKind::InvalidInput, "Wrong command"))
         }
@@ -118,20 +110,20 @@ impl Encoder<InMessage> for InCodec {
 
     /// Send response to remote peer
     fn encode(&mut self, item: InMessage, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        debug!("impl Encoder<InMessage> for InCodec");
         let mut writer = dst.writer();
         Ok(match item {
             InMessage::Request(req) => {
                 match req {
-                    crate::message::Request::MessageRequest(msg, addr) => {
+                    MessageRequest(msg, addr) => {
                         debug!("codec encode random message");
-                        let cmd_buf = [0u8; 1];
-                        writer.write_all(&cmd_buf)?;
                         let msg = MessageWithSender { msg, sender: addr };
                         encode_and_write_msg(writer, &msg)?;
                     }
                     PeersRequest => {
                         debug!("codec encode peer request");
                         let cmd_buf = [1u8; 1];
+                        //writer.flush()?;
                         writer.write_all(&cmd_buf)?;
                         writer.flush()?
                     }
@@ -156,14 +148,13 @@ impl Encoder<OutMessage> for InCodec {
 
     /// Respond to incoming connection
     fn encode(&mut self, item: OutMessage, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        debug!("impl Encoder<OutMessage> for InCodec");
         let mut writer = dst.writer();
         Ok(match item {
             OutMessage::Request(req) => {
                 match req {
-                    crate::message::Request::MessageRequest(msg, addr) => {
+                    MessageRequest(msg, addr) => {
                         debug!("codec encode random message");
-                        let cmd_buf = [0u8; 1];
-                        writer.write_all(&cmd_buf)?;
                         let msg = MessageWithSender { msg, sender: addr };
                         encode_and_write_msg(writer, &msg)?;
                     }
@@ -194,14 +185,13 @@ impl Encoder<OutMessage> for OutCodec {
 
     /// Send response to remote peer
     fn encode(&mut self, item: OutMessage, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        debug!("impl Encoder<OutMessage> for OutCodec");
         let mut writer = dst.writer();
         match item {
             OutMessage::Request(req) => {
                 match req {
                     MessageRequest(msg, addr) => {
                         debug!("codec encode random message");
-                        let cmd_buf = [0u8; 1];
-                        writer.write_all(&cmd_buf)?;
                         let msg = MessageWithSender { msg, sender: addr };
                         Ok(encode_and_write_msg(writer, &msg)?)
                     }
@@ -246,6 +236,8 @@ fn encode_and_write_msg(
     msg: &MessageWithSender)
     -> io::Result<()> {
     debug!("codec encode random message");
+    let command = [0u8; 1];
+    writer.write_all(&command)?;
     let byte_buf = bincode::serialize::<MessageWithSender>(&msg)
         .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "Invalid encoding"))?;
     let len = byte_buf.len() as u32;
@@ -254,34 +246,51 @@ fn encode_and_write_msg(
     Ok(writer.flush()?)
 }
 
-fn encode_and_write_peers(
-    mut writer: Writer<&mut BytesMut>,
-    peers: &HashSet<SocketAddr>)
-    -> io::Result<()> {
-    debug!("codec encode peers");
-    let byte_buf = bincode::serialize::<HashSet<SocketAddr>>(&peers)
-        .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "Invalid encoding"))?;
-    let len = byte_buf.len() as u32;
-    writer.write_u32::<BigEndian>(len)?;
-    Ok(writer.write_all(&byte_buf)?)
-}
-
 fn decode_msg(mut reader: Reader<&mut BytesMut>) -> io::Result<MessageWithSender> {
     debug!("codec decode random message");
     let size = reader.read_u32::<BigEndian>()?;
     let mut bytes_buf = vec![0_u8; size as usize];
     reader.read(&mut bytes_buf)?;
-    let msg = deserialize_data(&bytes_buf)?;
+    let payload = &bytes_buf[2..bytes_buf.len()];
+    let msg = deserialize_data(payload)?;
     Ok(msg)
+}
+
+fn encode_and_write_peers(
+    mut writer: Writer<&mut BytesMut>,
+    peers: &HashSet<SocketAddr>)
+    -> io::Result<()> {
+    //debug!("codec encode peers");
+    let command = [1u8; 1];
+    writer.write_all(&command)?;
+    let byte_buf = serialize_data(&peers)?;
+    let len = byte_buf.len() as u32;
+    //debug!("bytes len: {len}");
+    writer.write_u32::<BigEndian>(len)?;
+    writer.write_all(&byte_buf)?;
+    //debug!("peers bytes: {byte_buf:?}");
+    writer.flush()?;
+    Ok(())
 }
 
 fn decode_peers(mut reader: Reader<&mut BytesMut>) -> io::Result<HashSet<SocketAddr>> {
     debug!("codec decode peer request");
-    let size = reader.read_u32::<BigEndian>()?;
-    let mut bytes_buf = vec![0_u8; size as usize];
+    let len = reader.read_u32::<BigEndian>()?;
+    debug!("length is {len} bytes");
+    let mut bytes_buf = vec![0_u8; len as usize];
     reader.read(&mut bytes_buf)?;
+    debug!("bytes: {bytes_buf:?}");
+    debug!("buffer has data left: {:?}", reader.has_data_left().unwrap());
     let peers = deserialize_data(&bytes_buf)?;
+    debug!("deserialized peers: {peers:?}");
     Ok(peers)
+}
+
+pub fn serialize_data<DATA: serde::ser::Serialize>(data: DATA) -> io::Result<Vec<u8>> {
+    Ok(DefaultOptions::new()
+        .with_varint_encoding()
+        .serialize(&data)
+        .map_err(|e| io::Error::new(ErrorKind::InvalidInput, format!("serialization error: {e}")))?)
 }
 
 fn deserialize_data<'a, DATA: serde::de::Deserialize<'a>>(bytes:  &'a [u8])
@@ -292,9 +301,8 @@ fn deserialize_data<'a, DATA: serde::de::Deserialize<'a>>(bytes:  &'a [u8])
     if let Ok(data) = data {
         Ok(data)
     } else {
-        let err = data.err().unwrap();
-        error!("network::deserialize_data() error: {}",  err);
-        Err(io::Error::new(ErrorKind::InvalidData, "deserialization error"))
+        let err = format!("data deserialization error: {}",  data.err().unwrap());
+        Err(io::Error::new(ErrorKind::InvalidData, err))
     }
 }
 

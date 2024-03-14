@@ -1,3 +1,4 @@
+#![feature(buf_read_has_data_left)]
 mod peer;
 mod codec;
 mod connection;
