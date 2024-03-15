@@ -21,7 +21,7 @@ use crate::codec::{InCodec, OutCodec};
 use crate::connection::{InConnection, OutConnection};
 use crate::message::actor::ActorRequest;
 use crate::message::OutMessage;
-use crate::message::Request::PeersRequest;
+use crate::message::Request::{PeersRequest, TryHandshake};
 
 pub struct Peer {
     /// address being listened by peer
@@ -107,7 +107,7 @@ impl Actor for Peer {
                 error!("Couldn't establish connection with peer: {connect_to}, error {e}");
                 ctx.stop();
             })
-            .map(|res, actor, _ctx| {
+            .map(move |res, actor, _ctx| {
                 let stream = res.unwrap();
                 let remote_peer_addr = stream.peer_addr().unwrap();
                 let (r, w) = split(stream);
@@ -119,9 +119,13 @@ impl Actor for Peer {
                         peer_ctx_address,
                         FramedWrite::new(w, OutCodec, ctx))
                 });
-
-                // request all the other peers
-                let _ = initial_peer.try_send(OutMessage::Request(PeersRequest(actor.socket_addr)));
+                // try perform handshake with remote peer
+                let _ = initial_peer.try_send(
+                    OutMessage::Request(
+                        TryHandshake{
+                            sender: actor.socket_addr,
+                            receiver: connect_to})
+                );
             })
         );
 
@@ -196,7 +200,7 @@ pub struct AddConnectedPeer(pub SocketAddr);
 impl Handler<AddConnectedPeer> for Peer {
     type Result = ();
 
-    fn handle(&mut self, msg: AddConnectedPeer, ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: AddConnectedPeer, _ctx: &mut Self::Context) -> Self::Result {
         if self.peers.insert(msg.0) {
             debug!("peer [{}] has been added to peers", msg.0)
         }
@@ -221,10 +225,10 @@ impl Handler<ConnectPeers> for Peer {
                 } else { None }
             })
             .collect::<HashSet<SocketAddr>>();
-        
+
         let peers_to_connect = Arc::new(peers_to_connect);
         let peer_addr = self.socket_addr.clone();
-        
+
         peer_ctx.spawn(async move {
             // TODO define retry count
             let mut errors = HashSet::new();
@@ -235,9 +239,9 @@ impl Handler<ConnectPeers> for Peer {
                         let (r, w) = split(stream);
                         OutConnection::add_stream(FramedRead::new(r, OutCodec), ctx);
                         OutConnection::new(
-                            peer_addr, 
-                            *peer, 
-                            peer_actor.clone(), 
+                            peer_addr,
+                            *peer,
+                            peer_actor.clone(),
                             FramedWrite::new(w, OutCodec, ctx))
                     });
                 } else {

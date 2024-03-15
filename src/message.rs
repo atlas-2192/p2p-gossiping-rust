@@ -22,8 +22,8 @@ pub enum Response {
     PeersResponse(HashSet<SocketAddr>),
     // TODO
     MessageResponse(String, SocketAddr),
-    /// Result of handshake
-    Handshake(bool),
+    /// Result of handshake is socket address of peer answering to request
+    AcceptHandshake(bool),
 }
 
 #[derive(Debug, Message)]
@@ -33,8 +33,14 @@ pub enum Request {
     MessageRequest(String, SocketAddr),
     /// request for all active peers in network.
     PeersRequest,
-    /// Send self address to remote peer for connection
-    Handshake(SocketAddr),
+    /// Send peer's listening address to remote peer in order
+    /// to be able to be discovered by other peers in network
+    TryHandshake {
+        /// sender listening address
+        sender: SocketAddr,
+        /// send request to
+        receiver: SocketAddr
+    },
 }
 
 pub mod actor {

@@ -10,8 +10,8 @@ use tracing::log::error;
 use crate::codec::{OutCodec, InCodec};
 use crate::message::{InMessage, OutMessage, Request, Response};
 use crate::message::actor::ActorRequest;
-use crate::message::Request::MessageRequest;
-use crate::message::Response::{PeersResponse, MessageResponse};
+use crate::message::Request::{MessageRequest, PeersRequest, TryHandshake};
+use crate::message::Response::{PeersResponse, MessageResponse, AcceptHandshake};
 
 use crate::peer::{AddPeers, AddOutConnection, GetPeers, Peer, AddConnectedPeer};
 
@@ -50,7 +50,7 @@ impl Handler<InMessage> for InConnection {
     type Result = ();
 
     fn handle(&mut self, msg: InMessage, ctx: &mut Self::Context) -> Self::Result {
-        debug!("Handler<Request> for IncomingConnection");
+        debug!("Handler<InMessage> for IncomingConnection");
         match msg {
             InMessage::Request(req) => {
                 match req {
@@ -58,14 +58,12 @@ impl Handler<InMessage> for InConnection {
                         info!("sending message [{}] to [{}]", &msg, self.peer_addr);
                         self.write.write(InMessage::Request(MessageRequest(msg, addr)))
                     }
-                    Request::PeersRequest => {
+                    PeersRequest => {
                         self.peer_actor.send(GetPeers)
                             .into_actor(self)
                             .then(|res, actor, ctx| {
                                 match res {
                                     Ok(peers) => {
-                                        // Add just connected peer to connections
-                                        actor.peer_actor.try_send(AddConnectedPeer(peer_addr));
                                         actor.write.write(InMessage::Response(PeersResponse(peers)));
                                     }
                                     _ => debug!("Something is wrong"),
@@ -74,8 +72,10 @@ impl Handler<InMessage> for InConnection {
                             })
                             .wait(ctx)
                     }
-                    Request::Handshake(addr) => {
-
+                    TryHandshake {sender, receiver} => {
+                        // Try to perform handshake
+                        debug!("InConnection sending handshake request from [{receiver}] to [{sender}]");
+                        self.write.write(InMessage::Request(TryHandshake{sender, receiver}));
                     }
                 }
             },
@@ -87,8 +87,15 @@ impl Handler<InMessage> for InConnection {
                     MessageResponse(_, _) => {
                         unreachable!()
                     }
-                    Response::Handshake(result) => {
-
+                    AcceptHandshake(result) => {
+                        if !result {
+                            error!("Could not perform handshake!");
+                            // TODO check
+                            ctx.stop();
+                        } else {
+                            // request all the other peers
+                            let _ = ctx.address().try_send(InMessage::Request(PeersRequest));
+                        }
                     }
                 }
             },
@@ -107,14 +114,13 @@ impl StreamHandler<Result<InMessage, io::Error>> for InConnection {
                             MessageRequest(msg, addr) => {
                                 info!("Received message [{msg}] from [{addr}]");
                             }
-                            Request::PeersRequest => {
+                            PeersRequest => {
                                 self.peer_actor
                                     .send(GetPeers)
                                     .into_actor(self)
                                     .then(|res, actor, _ctx| {
                                         match res {
                                             Ok(peers) => {
-                                                actor.peer_actor.try_send(AddConnectedPeer(peer_addr));
                                                 actor.write.write(InMessage::Response(PeersResponse(peers)));
                                             }
                                             _ => debug!("Something is wrong"),
@@ -123,7 +129,12 @@ impl StreamHandler<Result<InMessage, io::Error>> for InConnection {
                                     })
                                     .wait(ctx)
                             }
-                            Request::Handshake(result) => {}
+                            TryHandshake {sender, receiver} => {
+                                // TODO Here we need to add peer to connections in successful case
+                                // Send handshake confirmation if it is ok
+                                debug!("InConnection received handshake request from [{sender}] to [{receiver}]");
+                                self.write.write(InMessage::Response(AcceptHandshake(true)));
+                            }
                         }
                     }
                     InMessage::Response(resp) => {
@@ -138,13 +149,22 @@ impl StreamHandler<Result<InMessage, io::Error>> for InConnection {
                                         debug!("mailbox error: {}", res.err().unwrap());
                                     }
                                     actix::fut::ready(())
-                                }).wait(ctx);
+                                })
+                                    .wait(ctx);
                             }
                             MessageResponse(_, _) => {
                                 unreachable!()
                             }
-                            Response::Handshake(result) => {
-
+                            AcceptHandshake(result) => {
+                                if !result {
+                                    error!("Could not perform handshake!");
+                                    // TODO check
+                                    ctx.stop();
+                                } else {
+                                    // request all the other peers
+                                    debug!("Handshake accepted successfully");
+                                    let _ = ctx.address().try_send(InMessage::Request(PeersRequest));
+                                }
                             }
                         }
                     }
@@ -207,14 +227,13 @@ impl StreamHandler<Result<OutMessage, io::Error>> for OutConnection {
                             MessageRequest(msg, sender) => {
                                 info!("received message [{msg}] from [{sender}]");
                             }
-                            Request::PeersRequest => {
+                            PeersRequest => {
                                 self.peer_actor
                                     .send(GetPeers)
                                     .into_actor(self)
                                     .then(|res, actor, _ctx| {
                                         match res {
                                             Ok(peers) => {
-                                                actor.peer_actor.try_send(AddConnectedPeer(peer_addr));
                                                 actor.write.write(OutMessage::Response(PeersResponse(peers)));
                                             }
                                             _ => debug!("Something is wrong"),
@@ -223,13 +242,17 @@ impl StreamHandler<Result<OutMessage, io::Error>> for OutConnection {
                                     })
                                     .wait(ctx)
                             }
-                            Request::Handshake() => {}
+                            TryHandshake {sender, receiver} => {
+                                // Try to perform handshake
+                                debug!("OutConnection received handshake request from [{receiver}] to [{sender}]");
+                                self.write.write(OutMessage::Request(TryHandshake {sender, receiver}));
+                            }
                         }
                     }
                     OutMessage::Response(resp) => {
                         debug!("got response from peer");
                         match resp {
-                            PeersResponse(mut peers) => {
+                            PeersResponse(peers) => {
                                 // Add the rest of peers, except already connected
                                 // peers.remove(&self.peer_addr);
                                 self.peer_actor.send(AddPeers(peers))
@@ -245,8 +268,16 @@ impl StreamHandler<Result<OutMessage, io::Error>> for OutConnection {
                             MessageResponse(_, _) => {
                                 debug!("unreachable");
                             }
-                            Response::Handshake(result) => {
-
+                            AcceptHandshake(result) => {
+                                if !result {
+                                    error!("Could not perform handshake!");
+                                    // TODO check
+                                    ctx.stop();
+                                } else {
+                                    debug!("OutConnection handshake accepted successfully");
+                                    // request all the other peers
+                                    let _ = ctx.address().try_send(OutMessage::Request(PeersRequest));
+                                }
                             }
                         }
                     }
@@ -260,11 +291,11 @@ impl StreamHandler<Result<OutMessage, io::Error>> for OutConnection {
     }
 }
 
-/// Encode requests for outgoing connections
+/// Encode messages for outgoing connections
 impl Handler<OutMessage> for OutConnection {
     type Result = ();
 
-    fn handle(&mut self, msg: OutMessage, _ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: OutMessage, ctx: &mut Self::Context) -> Self::Result {
         debug!("Handler<OutMessage> for OutgoingConnection");
         match msg {
             OutMessage::Request(req) => {
@@ -273,11 +304,15 @@ impl Handler<OutMessage> for OutConnection {
                         info!("sending message [{}] to [{}]", &msg, self.remote_peer_addr);
                         self.write.write(OutMessage::Request(MessageRequest(msg, addr)))
                     }
-                    Request::PeersRequest => {
+                    PeersRequest => {
                         debug!("sending peer request");
-                        self.write.write(OutMessage::Request(Request::PeersRequest))
+                        self.write.write(OutMessage::Request(PeersRequest))
                     }
-                    Request::Handshake(result) => {}
+                    TryHandshake {sender, receiver} => {
+                        // Try to perform handshake
+                        debug!("OutConnection sending handshake request from [{sender}] to [{receiver}]");
+                        self.write.write(OutMessage::Request(TryHandshake {sender, receiver}));
+                    }
                 }
             },
             OutMessage::Response(resp) => {
@@ -288,8 +323,17 @@ impl Handler<OutMessage> for OutConnection {
                     MessageResponse(_, _) => {
                         unreachable!()
                     }
-                    Response::Handshake(result) => {
-
+                    AcceptHandshake(result) => {
+                        if !result {
+                            error!("Could not perform handshake!");
+                            // TODO check
+                            ctx.stop();
+                        } else {
+                            // request all the other peers
+                            debug!("OutConnection handshake accepted successfully");
+                            unreachable!()
+                            //let _ = ctx.address().try_send(OutMessage::Request(PeersRequest));
+                        }
                     }
                 }
             },

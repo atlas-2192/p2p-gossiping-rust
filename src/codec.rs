@@ -13,8 +13,8 @@ use bytes::buf::{Reader, Writer};
 use serde_derive::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 use crate::message::{InMessage, OutMessage};
-use crate::message::Request::{MessageRequest, PeersRequest};
-use crate::message::Response::{MessageResponse, PeersResponse};
+use crate::message::Request::{TryHandshake, MessageRequest, PeersRequest};
+use crate::message::Response::{AcceptHandshake, MessageResponse, PeersResponse};
 
 /// Message [`actix::handler::Message`] flow:
 ///
@@ -33,6 +33,20 @@ use crate::message::Response::{MessageResponse, PeersResponse};
 /// Peer1 [`crate::peer::Peer`] actor
 
 /// Codec for [`crate::peer::OutConnection`]
+
+/*
+    Protocol commands
+ */
+const REQ_HANDSHAKE: u8 = 0;
+
+const RESP_HANDSHAKE: u8 = 1;
+
+const ACCEPT_HANDSHAKE: u8 = 2;
+
+const PEERS: u8 = 3;
+
+const MESSAGE: u8 = 4;
+
 pub struct OutCodec;
 
 impl Decoder for OutCodec {
@@ -46,7 +60,7 @@ impl Decoder for OutCodec {
         reader.read(&mut cmd_buf)?;
         debug!("impl Decoder for OutCodec received command: [{}]", &cmd_buf[0]);
         match cmd_buf[0] {
-            0 => {
+            MESSAGE => {
                 if !reader.has_data_left()? {
                     warn!("reader has no data within a buffer");
                     return Ok(None);
@@ -60,7 +74,7 @@ impl Decoder for OutCodec {
                         io::Error::new(ErrorKind::InvalidInput, "Decode error")
                     })?
             }
-            1 => {
+            PEERS => {
                 debug!("impl Decoder for OutCodec peers response");
                 decode_peers(reader)
                     .map(|peers| {
@@ -70,6 +84,26 @@ impl Decoder for OutCodec {
                         error!("decode_peers error : {e:?}");
                         io::Error::new(ErrorKind::InvalidInput, "Decode error")
                     })?
+            }
+            REQ_HANDSHAKE => {
+                debug!("Trying to perform handshake");
+                return if let Ok(req) = validate_handshake_req(reader) {
+                    debug!("handshake validated. sender address received");
+                    Ok(Some(OutMessage::Request(
+                        TryHandshake {
+                            sender: req.sender,
+                            receiver: req.receiver
+                        }
+                    )))
+                } else {
+                    error!("handshake error");
+                    Err(io::Error::new(ErrorKind::PermissionDenied, "handshake error"))
+                }
+            }
+            RESP_HANDSHAKE => {
+                // TODO get bool instead of sock addr
+                let res = validate_handshake_resp(reader)?;
+                Ok(Some(OutMessage::Response(AcceptHandshake(res))))
             }
             _ => Err(io::Error::new(ErrorKind::InvalidInput, "Wrong command"))
         }
@@ -91,7 +125,7 @@ impl Decoder for InCodec {
         reader.read(&mut cmd_buf)?;
         debug!("received command: [{}]", &cmd_buf[0]);
         match cmd_buf[0] {
-            0 => {
+            MESSAGE => {
                 if !reader.has_data_left()? {
                     warn!("reader has no data within a buffer");
                     // TODO find out why????
@@ -106,8 +140,22 @@ impl Decoder for InCodec {
                         io::Error::new(ErrorKind::InvalidInput, "Decode error")
                     })?
             }
-            1 => {
+            PEERS => {
                 Ok(Some(InMessage::Request(PeersRequest)))
+            }
+            REQ_HANDSHAKE => {
+                return if let Ok(req) = validate_handshake_req(reader) {
+                    debug!("handshake validated. sender address received");
+                    Ok(Some(InMessage::Request(
+                        TryHandshake {
+                            sender: req.sender,
+                            receiver: req.receiver,
+                        }
+                    )))
+                } else {
+                    error!("handshake error");
+                    Err(io::Error::new(ErrorKind::PermissionDenied, "handshake error"))
+                }
             }
             _ => Err(io::Error::new(ErrorKind::InvalidInput, "Wrong command"))
         }
@@ -127,14 +175,14 @@ impl Encoder<InMessage> for InCodec {
                     MessageRequest(msg, addr) => {
                         debug!("codec encode random message");
                         let msg = MessageWithSender { msg, sender: addr };
-                        encode_and_write_msg(writer, &msg)?;
+                        encode_msg(writer, &msg)?
                     }
                     PeersRequest => {
                         debug!("codec encode peer request");
-                        let cmd_buf = [1u8; 1];
-                        //writer.flush()?;
-                        writer.write_all(&cmd_buf)?;
-                        writer.flush()?
+                        encode_peers_req(writer)?
+                    }
+                    TryHandshake { sender, receiver} => {
+                        process_req_handshake(writer, &HandshakeReq {sender, receiver})?
                     }
                 }
             }
@@ -142,10 +190,14 @@ impl Encoder<InMessage> for InCodec {
                 match resp {
                     PeersResponse(peers) => {
                         debug!("encode_and_write_peers response");
-                        encode_and_write_peers(writer, &peers)?
+                        encode_peers(writer, &peers)?
                     }
                     MessageResponse(..) => {
+                        error!("MessageResponse(..) =>");
                         unreachable!()
+                    }
+                    AcceptHandshake(res) => {
+                        response_handshake(writer, res)?
                     }
                 }
             }
@@ -166,23 +218,27 @@ impl Encoder<OutMessage> for InCodec {
                     MessageRequest(msg, addr) => {
                         debug!("codec encode random message");
                         let msg = MessageWithSender { msg, sender: addr };
-                        encode_and_write_msg(writer, &msg)?;
+                        encode_msg(writer, &msg)?
                     }
                     PeersRequest => {
                         debug!("codec encode peer request");
-                        let cmd_buf = [1u8; 1];
-                        writer.write_all(&cmd_buf)?;
-                        writer.flush()?
+                        encode_peers_req(writer)?
+                    }
+                    TryHandshake{sender, receiver} => {
+                        process_req_handshake(writer, &HandshakeReq {sender, receiver})?
                     }
                 }
             }
             OutMessage::Response(resp) => {
                 match resp {
                     PeersResponse(peers) => {
-                        encode_and_write_peers(writer, &peers)?
+                        encode_peers(writer, &peers)?
                     }
                     MessageResponse(..) => {
                         unreachable!()
+                    }
+                    AcceptHandshake(res) => {
+                        response_handshake(writer, res)?
                     }
                 }
             }
@@ -193,26 +249,24 @@ impl Encoder<OutMessage> for InCodec {
 impl Encoder<OutMessage> for OutCodec {
     type Error = io::Error;
 
-    /// Send response to remote peer
+
     fn encode(&mut self, item: OutMessage, dst: &mut BytesMut) -> Result<(), Self::Error> {
         debug!("impl Encoder<OutMessage> for OutCodec");
         let mut writer = dst.writer();
-        use tracing::warn;
-        warn!("item: {item:?}");
         match item {
             OutMessage::Request(req) => {
-                warn!("req: {req:?}");
                 match req {
                     MessageRequest(msg, addr) => {
                         debug!("codec encode random message");
                         let msg = MessageWithSender { msg, sender: addr };
-                        Ok(encode_and_write_msg(writer, &msg)?)
+                        Ok(encode_msg(writer, &msg)?)
                     }
                     PeersRequest => {
                         debug!("codec encode peer request");
-                        let cmd_buf = [1u8; 1];
-                        writer.write_all(&cmd_buf)?;
-                        Ok(writer.flush()?)
+                        Ok(encode_peers_req(writer)?)
+                    }
+                    TryHandshake{sender, receiver} => {
+                        Ok(process_req_handshake(writer, &HandshakeReq {sender, receiver})?)
                     }
                 }
             }
@@ -220,23 +274,18 @@ impl Encoder<OutMessage> for OutCodec {
                 warn!("resp: {resp:?}");
                 match resp {
                     PeersResponse(peers) => {
-                        Ok(encode_and_write_peers(writer, &peers)?)
+                        Ok(encode_peers(writer, &peers)?)
                     }
                     MessageResponse(..) => {
                         unreachable!()
                     }
+                    AcceptHandshake(res) => {
+                        debug!("Handshake result : {res}");
+                        Ok(response_handshake(writer, res)?)
+                    }
                 }
             }
         }
-    }
-}
-
-impl Encoder<InMessage> for OutCodec {
-    type Error = io::Error;
-
-    fn encode(&mut self, item: InMessage, dst: &mut BytesMut) -> Result<(), Self::Error> {
-
-        todo!()
     }
 }
 
@@ -246,12 +295,21 @@ struct MessageWithSender {
     sender: SocketAddr,
 }
 
-fn encode_and_write_msg(
-    mut writer: Writer<&mut BytesMut>,
-    msg: &MessageWithSender)
-    -> io::Result<()> {
+#[derive(Serialize, Deserialize)]
+struct HandshakeReq {
+    sender: SocketAddr,
+    receiver: SocketAddr,
+}
+
+fn encode_peers_req(mut writer: Writer<&mut BytesMut>) -> io::Result<()> {
+    let cmd_buf = [PEERS; 1];
+    writer.write_all(&cmd_buf)?;
+    Ok(writer.flush()?)
+}
+
+fn encode_msg(mut writer: Writer<&mut BytesMut>, msg: &MessageWithSender) -> io::Result<()> {
     debug!("codec encode random message");
-    let command = [0u8; 1];
+    let command = [MESSAGE; 1];
     writer.write_all(&command)?;
     warn!("COMMAND [{command:?}] HAS BEEN WRITTEN TO WRITER");
     let byte_buf = serialize_data(&msg)?;
@@ -274,14 +332,10 @@ fn decode_msg(mut reader: Reader<&mut BytesMut>) -> io::Result<MessageWithSender
     Ok(msg)
 }
 
-fn encode_and_write_peers(
-    mut writer: Writer<&mut BytesMut>,
-    peers: &HashSet<SocketAddr>)
-    -> io::Result<()> {
-    let command = [1u8; 1];
+fn encode_peers(mut writer: Writer<&mut BytesMut>, peers: &HashSet<SocketAddr>) -> io::Result<()> {
+    let command = [PEERS; 1];
     writer.write_all(&command)?;
-    warn!("COMMAND [{command:?}] HAS BEEN WRITTEN TO WRITER");
-    let byte_buf = serialize_data(&peers)?;
+    let byte_buf = serialize_data(peers)?;
     let len = byte_buf.len() as u32;
     writer.write_u32::<BigEndian>(len)?;
     writer.write_all(&byte_buf)?;
@@ -295,6 +349,66 @@ fn decode_peers(mut reader: Reader<&mut BytesMut>) -> io::Result<HashSet<SocketA
     reader.read(&mut bytes_buf)?;
     let peers = deserialize_data(&bytes_buf)?;
     Ok(peers)
+}
+
+fn process_req_handshake(mut writer: Writer<&mut BytesMut>, req: &HandshakeReq)
+                         -> io::Result<()> {
+    let command = [REQ_HANDSHAKE; 1];
+    writer.write_all(&command)?;
+    writer.write_all(b"secret")?;
+    let byte_buf = serialize_data(req)?;
+    let len = byte_buf.len() as u32;
+    writer.write_u32::<BigEndian>(len)?;
+    writer.write_all(&byte_buf)?;
+    writer.flush()?;
+    Ok(())
+}
+
+/// Validate request and return sender socket address
+fn validate_handshake_req(mut reader: Reader<&mut BytesMut>) -> io::Result<HandshakeReq> {
+    let mut buf = [0; 6];
+    reader.read(&mut buf)?;
+    if buf.ne(b"secret") {
+        return Err(io::Error::new(ErrorKind::PermissionDenied, "Handshake error"))
+    }
+    let len = reader.read_u32::<BigEndian>()?;
+    let mut bytes_buf = vec![0_u8; len as usize];
+    reader.read(&mut bytes_buf)?;
+    let req = deserialize_data(&bytes_buf)?;
+    Ok(req)
+}
+
+/// Answer to [`process_req_handshake`]. Returns peer's address answering to handshake request
+fn response_handshake(mut writer: Writer<&mut BytesMut>, success: bool) -> io::Result<()> {
+    debug!("response_handshake() res : {success}");
+    let command = [ACCEPT_HANDSHAKE; 1];
+    writer.write_all(&command)?;
+    match success {
+        true => {
+            writer.write_u8(1)?;
+            writer.flush()?;
+        },
+        false => {
+            writer.write_u8(0)?;
+            writer.flush()?;
+        },
+    };
+    Ok(())
+}
+
+/// Validate handshake response
+fn validate_handshake_resp(mut reader: Reader<&mut BytesMut>) -> io::Result<bool> {
+    let mut result_buf = [0; 1];
+    reader.read(&mut result_buf)?;
+    match result_buf[0] {
+        0 => {
+            Ok(false)
+        }
+        1 => {
+            Ok(true)
+        }
+        _ => Err(io::Error::new(ErrorKind::InvalidInput, "Wrong command"))
+    }
 }
 
 pub fn serialize_data<DATA: serde::ser::Serialize>(data: DATA) -> io::Result<Vec<u8>> {
