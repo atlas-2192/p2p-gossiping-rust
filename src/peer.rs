@@ -19,9 +19,9 @@ use tracing::field::debug;
 use tracing::log::error;
 use crate::codec::{InCodec, OutCodec};
 use crate::connection::{InConnection, OutConnection};
-use crate::message::actor::ActorRequest;
 use crate::message::OutMessage;
-use crate::message::Request::{PeersRequest, TryHandshake};
+use crate::message::Request::TryHandshake;
+
 
 pub struct Peer {
     /// address being listened by peer
@@ -123,6 +123,7 @@ impl Actor for Peer {
                 let _ = initial_peer.try_send(
                     OutMessage::Request(
                         TryHandshake{
+                            token: b"secret".to_vec(),
                             sender: actor.socket_addr,
                             receiver: connect_to})
                 );
@@ -157,7 +158,7 @@ impl Handler<AddInConnection> for Peer {
 
     fn handle(&mut self, msg: AddInConnection, _ctx: &mut Self::Context) -> Self::Result {
         let _ = self.connections.insert(Connection::In(msg.0));
-        let _ = self.peers.insert(msg.1);
+        //let _ = self.peers.insert(msg.1);
     }
 }
 
@@ -171,6 +172,19 @@ impl Handler<AddOutConnection> for Peer {
     fn handle(&mut self, msg: AddOutConnection, _ctx: &mut Self::Context) -> Self::Result {
         let _ = self.connections.insert(Connection::Out(msg.0));
         let _ = self.peers.insert(msg.1);
+    }
+}
+
+#[derive(Debug, Message)]
+#[rtype(result = "()")]
+pub struct AddPeer(pub SocketAddr);
+
+impl Handler<AddPeer> for Peer {
+    type Result = ();
+
+    fn handle(&mut self, msg: AddPeer, ctx: &mut Self::Context) -> Self::Result {
+        debug!("peer [{}] added to peers list", msg.0);
+        self.peers.insert(msg.0);
     }
 }
 

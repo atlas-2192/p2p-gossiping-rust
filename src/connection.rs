@@ -1,19 +1,25 @@
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::io;
+use std::io::{ErrorKind, Read};
 use std::net::SocketAddr;
 use actix::{Actor, ActorContext, ActorFutureExt, ActorTryFutureExt, Addr, AsyncContext, Context, ContextFutureSpawner, Handler, StreamHandler, WrapFuture};
 use actix::io::{FramedWrite, WriteHandler};
+use byteorder::BigEndian;
+use bytes::buf::{Reader, Writer};
+use bytes::BytesMut;
+use serde_derive::{Deserialize, Serialize};
 use tokio::io::WriteHalf;
 use tokio::net::TcpStream;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use tracing::log::error;
-use crate::codec::{OutCodec, InCodec};
-use crate::message::{InMessage, OutMessage, Request, Response};
-use crate::message::actor::ActorRequest;
+use crate::codec::{OutCodec, InCodec, serialize_data};
+use crate::message::{InMessage, OutMessage};
 use crate::message::Request::{MessageRequest, PeersRequest, TryHandshake};
-use crate::message::Response::{PeersResponse, AcceptHandshake};
+use crate::message::Response::{AcceptHandshake, PeersResponse};
 
-use crate::peer::{AddPeers, AddOutConnection, GetPeers, Peer, AddConnectedPeer};
+
+use crate::peer::{AddPeers, AddOutConnection, GetPeers, Peer, AddConnectedPeer, AddPeer};
 
 /// Connection initiated by remote peer
 pub struct InConnection {
@@ -45,7 +51,7 @@ impl Actor for InConnection {
     }
 }
 
-/// Encode responses to incoming network connections
+/// Encode messages to send them to incoming network connections
 impl Handler<InMessage> for InConnection {
     type Result = ();
 
@@ -59,23 +65,12 @@ impl Handler<InMessage> for InConnection {
                         self.write.write(InMessage::Request(MessageRequest(msg, addr)))
                     }
                     PeersRequest => {
-                        self.peer_actor.send(GetPeers)
-                            .into_actor(self)
-                            .then(|res, actor, ctx| {
-                                match res {
-                                    Ok(peers) => {
-                                        actor.write.write(InMessage::Response(PeersResponse(peers)));
-                                    }
-                                    _ => debug!("Something is wrong"),
-                                }
-                                actix::fut::ready(())
-                            })
-                            .wait(ctx)
+                        self.write.write(InMessage::Request(PeersRequest));
                     }
-                    TryHandshake {sender, receiver} => {
+                    TryHandshake {token, sender, receiver} => {
                         // Try to perform handshake
                         debug!("InConnection sending handshake request from [{receiver}] to [{sender}]");
-                        self.write.write(InMessage::Request(TryHandshake{sender, receiver}));
+                        self.write.write(InMessage::Request(TryHandshake{ token, sender, receiver}));
                     }
                 }
             },
@@ -85,14 +80,7 @@ impl Handler<InMessage> for InConnection {
                         self.write.write(InMessage::Response(PeersResponse(peers)))
                     }
                     AcceptHandshake(result) => {
-                        if !result {
-                            error!("Could not perform handshake!");
-                            // TODO check
-                            ctx.stop();
-                        } else {
-                            // request all the other peers
-                            let _ = ctx.address().try_send(InMessage::Request(PeersRequest));
-                        }
+                        self.write.write(InMessage::Response(AcceptHandshake(result)))
                     }
                 }
             },
@@ -126,11 +114,17 @@ impl StreamHandler<Result<InMessage, io::Error>> for InConnection {
                                     })
                                     .wait(ctx)
                             }
-                            TryHandshake {sender, receiver} => {
-                                // TODO Here we need to add sender to connections in successful case
-                                // Send handshake confirmation if it is ok
+                            TryHandshake {token, sender, receiver} => {
                                 debug!("InConnection received handshake request from [{sender}] to [{receiver}]");
-                                self.write.write(InMessage::Response(AcceptHandshake(true)));
+                                let validated = validate_handshake(&token);
+                                // add sender to peers list in successful case
+                                if validated {
+                                    info!("Handshake validated");
+                                    self.peer_actor.try_send(AddPeer(sender));
+                                } else {
+                                    info!{"Handshake failed"}
+                                }
+                                self.write.write(InMessage::Response(AcceptHandshake(validated)));
                             }
                         }
                     }
@@ -236,10 +230,17 @@ impl StreamHandler<Result<OutMessage, io::Error>> for OutConnection {
                                     })
                                     .wait(ctx)
                             }
-                            TryHandshake {sender, receiver} => {
-                                // Try to perform handshake
+                            TryHandshake {token, sender, receiver} => {
                                 debug!("OutConnection received handshake request from [{receiver}] to [{sender}]");
-                                self.write.write(OutMessage::Request(TryHandshake {sender, receiver}));
+                                let validated = validate_handshake(&token);
+                                // add sender to peers list in successful case
+                                if validated {
+                                    info!("Handshake validated");
+                                    self.peer_actor.try_send(AddPeer(sender));
+                                } else {
+                                    info!{"Handshake failed"}
+                                }
+                                self.write.write(OutMessage::Response(AcceptHandshake(validated)));
                             }
                         }
                     }
@@ -299,10 +300,10 @@ impl Handler<OutMessage> for OutConnection {
                         debug!("sending peer request");
                         self.write.write(OutMessage::Request(PeersRequest))
                     }
-                    TryHandshake {sender, receiver} => {
+                    TryHandshake {token, sender, receiver} => {
                         // Try to perform handshake
                         debug!("OutConnection sending handshake request from [{sender}] to [{receiver}]");
-                        self.write.write(OutMessage::Request(TryHandshake {sender, receiver}));
+                        self.write.write(OutMessage::Request(TryHandshake {token, sender, receiver}));
                     }
                 }
             },
@@ -312,21 +313,17 @@ impl Handler<OutMessage> for OutConnection {
                         self.write.write(OutMessage::Response(PeersResponse(peers)))
                     }
                     AcceptHandshake(result) => {
-                        if !result {
-                            error!("Could not perform handshake!");
-                            // TODO check
-                            ctx.stop();
-                        } else {
-                            // request all the other peers
-                            debug!("OutConnection handshake accepted successfully");
-                            unreachable!()
-                            //let _ = ctx.address().try_send(OutMessage::Request(PeersRequest));
-                        }
+                        self.write.write(OutMessage::Response(AcceptHandshake(result)))
                     }
                 }
             },
         }
     }
+}
+
+/// decrypting emulation
+fn validate_handshake(token: &[u8]) -> bool {
+    token == b"secret"
 }
 
 impl Hash for InConnection {
@@ -360,3 +357,141 @@ impl Eq for OutConnection {}
 impl WriteHandler<std::io::Error> for InConnection {}
 
 impl WriteHandler<std::io::Error> for OutConnection {}
+
+
+// /*
+//     Protocol commands
+//  */
+// const REQ_HANDSHAKE: u8 = 1;
+//
+// const RESP_HANDSHAKE: u8 = 2;
+//
+// const ACCEPT_HANDSHAKE: u8 = 3;
+//
+// const PEERS: u8 = 4;
+//
+// const MESSAGE: u8 = 5;
+//
+// #[derive(Serialize, Deserialize)]
+// struct MessageWithSender {
+//     msg: String,
+//     sender: SocketAddr,
+// }
+//
+// #[derive(Serialize, Deserialize)]
+// struct HandshakeReq {
+//     sender: SocketAddr,
+//     receiver: SocketAddr,
+// }
+//
+// fn encode_peers_req(mut writer: Writer<&mut BytesMut>) -> io::Result<()> {
+//     let cmd_buf = [crate::codec::PEERS; 1];
+//     writer.write_all(&cmd_buf)?;
+//     Ok(())
+//     //Ok(writer.flush()?)
+// }
+//
+// fn encode_msg(mut writer: Writer<&mut BytesMut>, msg: &MessageWithSender) -> io::Result<()> {
+//     debug!("codec encode random message");
+//     let command = [crate::codec::MESSAGE; 1];
+//     writer.write_all(&command)?;
+//     warn!("COMMAND [{command:?}] HAS BEEN WRITTEN TO WRITER");
+//     let byte_buf = serialize_data(&msg)?;
+//     debug!("byte_buf : {byte_buf:?}");
+//     let len = byte_buf.len() as u32;
+//     writer.write_u32::<BigEndian>(len)?;
+//     writer.write_all(&byte_buf)?;
+//     debug!("byte_buf: {byte_buf:?}");
+//     Ok(())
+//     //Ok(writer.flush()?)
+// }
+//
+// fn decode_msg(mut reader: Reader<&mut BytesMut>) -> io::Result<MessageWithSender> {
+//     debug!("codec decode random message");
+//     let len = reader.read_u32::<BigEndian>()?;
+//     let mut bytes_buf = vec![0_u8; len as usize];
+//     reader.read(&mut bytes_buf)?;
+//     let payload = &bytes_buf[1..bytes_buf.len()];
+//     debug!("byte_buf: {bytes_buf:?}");
+//     let msg = crate::codec::deserialize_data(&payload)?;
+//     Ok(msg)
+// }
+//
+// fn encode_peers(mut writer: Writer<&mut BytesMut>, peers: &HashSet<SocketAddr>) -> io::Result<()> {
+//     let command = [crate::codec::PEERS; 1];
+//     writer.write_all(&command)?;
+//     let byte_buf = serialize_data(peers)?;
+//     let len = byte_buf.len() as u32;
+//     writer.write_u32::<BigEndian>(len)?;
+//     writer.write_all(&byte_buf)?;
+//     //writer.flush()?;
+//     Ok(())
+// }
+//
+// fn decode_peers(mut reader: Reader<&mut BytesMut>) -> io::Result<HashSet<SocketAddr>> {
+//     let len = reader.read_u32::<BigEndian>()?;
+//     let mut bytes_buf = vec![0_u8; len as usize];
+//     reader.read(&mut bytes_buf)?;
+//     let peers = crate::codec::deserialize_data(&bytes_buf)?;
+//     Ok(peers)
+// }
+//
+// fn process_req_handshake(mut writer: Writer<&mut BytesMut>, req: &HandshakeReq)
+//                          -> io::Result<()> {
+//     let command = [crate::codec::REQ_HANDSHAKE; 1];
+//     writer.write_all(&command)?;
+//     writer.write_all(b"secret")?;
+//     let byte_buf = serialize_data(req)?;
+//     let len = byte_buf.len() as u32;
+//     writer.write_u32::<BigEndian>(len)?;
+//     writer.write_all(&byte_buf)?;
+//     //writer.flush()?;
+//     Ok(())
+// }
+//
+// /// Validate request and return sender socket address
+// fn validate_handshake_req(mut reader: Reader<&mut BytesMut>) -> io::Result<HandshakeReq> {
+//     let mut buf = [0; 6];
+//     reader.read(&mut buf)?;
+//     if buf.ne(b"secret") {
+//         return Err(io::Error::new(ErrorKind::PermissionDenied, "Handshake error"))
+//     }
+//     let len = reader.read_u32::<BigEndian>()?;
+//     let mut bytes_buf = vec![0_u8; len as usize];
+//     reader.read(&mut bytes_buf)?;
+//     let req = crate::codec::deserialize_data(&bytes_buf)?;
+//     Ok(req)
+// }
+//
+// /// Answer to [`process_req_handshake`]. Returns peer's address answering to handshake request
+// fn response_handshake(mut writer: Writer<&mut BytesMut>, success: bool) -> io::Result<()> {
+//     debug!("response_handshake() res : {success}");
+//     let command = [crate::codec::ACCEPT_HANDSHAKE; 1];
+//     writer.write_all(&command)?;
+//     match success {
+//         true => {
+//             writer.write_u8(1)?;
+//             //writer.flush()?;
+//         },
+//         false => {
+//             writer.write_u8(0)?;
+//             //writer.flush()?;
+//         },
+//     };
+//     Ok(())
+// }
+//
+// /// Validate handshake response
+// fn validate_handshake_resp(mut reader: Reader<&mut BytesMut>) -> io::Result<bool> {
+//     let mut result_buf = [0; 1];
+//     reader.read(&mut result_buf)?;
+//     match result_buf[0] {
+//         0 => {
+//             Ok(false)
+//         }
+//         1 => {
+//             Ok(true)
+//         }
+//         _ => Err(io::Error::new(ErrorKind::InvalidInput, "Wrong command"))
+//     }
+// }
