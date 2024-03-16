@@ -1,11 +1,8 @@
 use std::io;
-use std::collections::HashSet;
-use std::io::{BufRead, ErrorKind, Read, Write};
-use std::net::SocketAddr;
-use std::str::FromStr;
+use std::io::{ErrorKind};
 
 use actix::prelude::*;
-use byteorder::{BigEndian, ByteOrder, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, BytesMut};
 use actix_codec::{Decoder, Encoder};
 use bincode::{DefaultOptions, Options};

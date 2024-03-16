@@ -3,6 +3,7 @@ use std::hash::{Hash, Hasher};
 use std::io;
 use std::io::{ErrorKind, Read};
 use std::net::SocketAddr;
+use std::time::Duration;
 use actix::{Actor, ActorContext, ActorFutureExt, ActorTryFutureExt, Addr, AsyncContext, Context, ContextFutureSpawner, Handler, StreamHandler, WrapFuture};
 use actix::io::{FramedWrite, WriteHandler};
 use byteorder::BigEndian;
@@ -14,6 +15,7 @@ use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 use tracing::log::error;
 use crate::codec::{OutCodec, InCodec, serialize_data};
+use crate::gen_rnd_msg;
 use crate::message::{InMessage, OutMessage};
 use crate::message::Request::{MessageRequest, PeersRequest, TryHandshake};
 use crate::message::Response::{AcceptHandshake, PeersResponse};
@@ -129,19 +131,34 @@ impl StreamHandler<Result<InMessage, io::Error>> for InConnection {
                         }
                     }
                     InMessage::Response(resp) => {
-                        debug!("got msg from peer");
+                        debug!("in connection : got response from peer");
                         match resp {
-                            PeersResponse(peers) => {
+                            PeersResponse(mut peers) => {
                                 // Add the rest of peers, except already connected
-                                // peers.remove(&self.peer_addr);
+                                peers.remove(&self.peer_addr);
                                 self.peer_actor.send(AddPeers(peers))
-                                    .into_actor(self).then(|res, conn_actor, _ctx| {
-                                    if res.is_err() {
-                                        debug!("mailbox error: {}", res.err().unwrap());
-                                    }
-                                    actix::fut::ready(())
-                                })
+                                    .into_actor(self)
+                                    .then(|res, _actor, ctx| {
+                                        if res.is_err() {
+                                            error!("couldn't add peers: {}", res.err().unwrap());
+                                            ctx.stop();
+                                        }
+                                        actix::fut::ready(())
+                                    })
                                     .wait(ctx);
+
+                                let actor = ctx.address();
+                                let sender = self.peer_addr;
+                                let period = Duration::from_secs(3);
+                                ctx.spawn(async move {
+                                    let msg = gen_rnd_msg();
+                                    loop {
+                                        tokio::time::sleep(period).await;
+                                        let connected_peers =
+                                        actor.try_send(InMessage::Request(MessageRequest(msg.clone(), sender)));
+                                    }
+                                }
+                                    .into_actor(self));
                             }
                             AcceptHandshake(result) => {
                                 if !result {
@@ -245,20 +262,33 @@ impl StreamHandler<Result<OutMessage, io::Error>> for OutConnection {
                         }
                     }
                     OutMessage::Response(resp) => {
-                        debug!("got response from peer");
+                        debug!("out connection : got response from peer");
                         match resp {
-                            PeersResponse(peers) => {
+                            PeersResponse(mut peers) => {
                                 // Add the rest of peers, except already connected
-                                // peers.remove(&self.peer_addr);
+                                peers.remove(&self.peer_addr);
                                 self.peer_actor.send(AddPeers(peers))
                                     .into_actor(self)
-                                    .then(|res, _actor, _ctx| {
+                                    .then(|res, _actor, ctx| {
                                         if res.is_err() {
-                                            debug!("mailbox error: {}", res.err().unwrap());
+                                            error!("couldn't add peers: {}", res.err().unwrap());
+                                            ctx.stop();
                                         }
                                         actix::fut::ready(())
                                     })
                                     .wait(ctx);
+
+                                let actor = ctx.address();
+                                let sender = self.peer_addr;
+                                let period = Duration::from_secs(3);
+                                ctx.spawn(async move {
+                                    let msg = gen_rnd_msg();
+                                    loop {
+                                        tokio::time::sleep(period).await;
+                                        actor.try_send(OutMessage::Request(MessageRequest(msg.clone(), sender)));
+                                    }
+                                }
+                                    .into_actor(self));
                             }
                             AcceptHandshake(result) => {
                                 if !result {
