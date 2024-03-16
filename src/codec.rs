@@ -14,7 +14,7 @@ use serde_derive::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 use crate::message::{InMessage, OutMessage};
 use crate::message::Request::{TryHandshake, MessageRequest, PeersRequest};
-use crate::message::Response::{AcceptHandshake, MessageResponse, PeersResponse};
+use crate::message::Response::{AcceptHandshake, PeersResponse};
 
 /// Message [`actix::handler::Message`] flow:
 ///
@@ -37,15 +37,15 @@ use crate::message::Response::{AcceptHandshake, MessageResponse, PeersResponse};
 /*
     Protocol commands
  */
-const REQ_HANDSHAKE: u8 = 0;
+const REQ_HANDSHAKE: u8 = 1;
 
-const RESP_HANDSHAKE: u8 = 1;
+const RESP_HANDSHAKE: u8 = 2;
 
-const ACCEPT_HANDSHAKE: u8 = 2;
+const ACCEPT_HANDSHAKE: u8 = 3;
 
-const PEERS: u8 = 3;
+const PEERS: u8 = 4;
 
-const MESSAGE: u8 = 4;
+const MESSAGE: u8 = 5;
 
 pub struct OutCodec;
 
@@ -67,7 +67,7 @@ impl Decoder for OutCodec {
                 }
                 decode_msg(reader)
                     .map(|msg| {
-                        Ok(Some(OutMessage::Response(MessageResponse(msg.msg, msg.sender))))
+                        Ok(Some(OutMessage::Request(MessageRequest(msg.msg, msg.sender))))
                     })
                     .map_err(|e| {
                         error!("decode_msg error : {e:?}");
@@ -100,7 +100,7 @@ impl Decoder for OutCodec {
                     Err(io::Error::new(ErrorKind::PermissionDenied, "handshake error"))
                 }
             }
-            RESP_HANDSHAKE => {
+            ACCEPT_HANDSHAKE => {
                 // TODO get bool instead of sock addr
                 let res = validate_handshake_resp(reader)?;
                 Ok(Some(OutMessage::Response(AcceptHandshake(res))))
@@ -133,7 +133,7 @@ impl Decoder for InCodec {
                 }
                 decode_msg(reader)
                     .map(|msg| {
-                        Ok(Some(InMessage::Response(MessageResponse(msg.msg, msg.sender))))
+                        Ok(Some(InMessage::Request(MessageRequest(msg.msg, msg.sender))))
                     })
                     .map_err(|e| {
                         error!("decode_msg error : {e:?}");
@@ -192,10 +192,6 @@ impl Encoder<InMessage> for InCodec {
                         debug!("encode_and_write_peers response");
                         encode_peers(writer, &peers)?
                     }
-                    MessageResponse(..) => {
-                        error!("MessageResponse(..) =>");
-                        unreachable!()
-                    }
                     AcceptHandshake(res) => {
                         response_handshake(writer, res)?
                     }
@@ -233,9 +229,6 @@ impl Encoder<OutMessage> for InCodec {
                 match resp {
                     PeersResponse(peers) => {
                         encode_peers(writer, &peers)?
-                    }
-                    MessageResponse(..) => {
-                        unreachable!()
                     }
                     AcceptHandshake(res) => {
                         response_handshake(writer, res)?
@@ -276,9 +269,6 @@ impl Encoder<OutMessage> for OutCodec {
                     PeersResponse(peers) => {
                         Ok(encode_peers(writer, &peers)?)
                     }
-                    MessageResponse(..) => {
-                        unreachable!()
-                    }
                     AcceptHandshake(res) => {
                         debug!("Handshake result : {res}");
                         Ok(response_handshake(writer, res)?)
@@ -304,7 +294,8 @@ struct HandshakeReq {
 fn encode_peers_req(mut writer: Writer<&mut BytesMut>) -> io::Result<()> {
     let cmd_buf = [PEERS; 1];
     writer.write_all(&cmd_buf)?;
-    Ok(writer.flush()?)
+    Ok(())
+    //Ok(writer.flush()?)
 }
 
 fn encode_msg(mut writer: Writer<&mut BytesMut>, msg: &MessageWithSender) -> io::Result<()> {
@@ -318,7 +309,8 @@ fn encode_msg(mut writer: Writer<&mut BytesMut>, msg: &MessageWithSender) -> io:
     writer.write_u32::<BigEndian>(len)?;
     writer.write_all(&byte_buf)?;
     debug!("byte_buf: {byte_buf:?}");
-    Ok(writer.flush()?)
+    Ok(())
+    //Ok(writer.flush()?)
 }
 
 fn decode_msg(mut reader: Reader<&mut BytesMut>) -> io::Result<MessageWithSender> {
@@ -339,7 +331,7 @@ fn encode_peers(mut writer: Writer<&mut BytesMut>, peers: &HashSet<SocketAddr>) 
     let len = byte_buf.len() as u32;
     writer.write_u32::<BigEndian>(len)?;
     writer.write_all(&byte_buf)?;
-    writer.flush()?;
+    //writer.flush()?;
     Ok(())
 }
 
@@ -360,7 +352,7 @@ fn process_req_handshake(mut writer: Writer<&mut BytesMut>, req: &HandshakeReq)
     let len = byte_buf.len() as u32;
     writer.write_u32::<BigEndian>(len)?;
     writer.write_all(&byte_buf)?;
-    writer.flush()?;
+    //writer.flush()?;
     Ok(())
 }
 
@@ -386,11 +378,11 @@ fn response_handshake(mut writer: Writer<&mut BytesMut>, success: bool) -> io::R
     match success {
         true => {
             writer.write_u8(1)?;
-            writer.flush()?;
+            //writer.flush()?;
         },
         false => {
             writer.write_u8(0)?;
-            writer.flush()?;
+            //writer.flush()?;
         },
     };
     Ok(())

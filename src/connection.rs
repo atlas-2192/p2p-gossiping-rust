@@ -11,7 +11,7 @@ use crate::codec::{OutCodec, InCodec};
 use crate::message::{InMessage, OutMessage, Request, Response};
 use crate::message::actor::ActorRequest;
 use crate::message::Request::{MessageRequest, PeersRequest, TryHandshake};
-use crate::message::Response::{PeersResponse, MessageResponse, AcceptHandshake};
+use crate::message::Response::{PeersResponse, AcceptHandshake};
 
 use crate::peer::{AddPeers, AddOutConnection, GetPeers, Peer, AddConnectedPeer};
 
@@ -84,9 +84,6 @@ impl Handler<InMessage> for InConnection {
                     PeersResponse(peers) => {
                         self.write.write(InMessage::Response(PeersResponse(peers)))
                     }
-                    MessageResponse(_, _) => {
-                        unreachable!()
-                    }
                     AcceptHandshake(result) => {
                         if !result {
                             error!("Could not perform handshake!");
@@ -130,7 +127,7 @@ impl StreamHandler<Result<InMessage, io::Error>> for InConnection {
                                     .wait(ctx)
                             }
                             TryHandshake {sender, receiver} => {
-                                // TODO Here we need to add peer to connections in successful case
+                                // TODO Here we need to add sender to connections in successful case
                                 // Send handshake confirmation if it is ok
                                 debug!("InConnection received handshake request from [{sender}] to [{receiver}]");
                                 self.write.write(InMessage::Response(AcceptHandshake(true)));
@@ -151,9 +148,6 @@ impl StreamHandler<Result<InMessage, io::Error>> for InConnection {
                                     actix::fut::ready(())
                                 })
                                     .wait(ctx);
-                            }
-                            MessageResponse(_, _) => {
-                                unreachable!()
                             }
                             AcceptHandshake(result) => {
                                 if !result {
@@ -265,9 +259,6 @@ impl StreamHandler<Result<OutMessage, io::Error>> for OutConnection {
                                     })
                                     .wait(ctx);
                             }
-                            MessageResponse(_, _) => {
-                                debug!("unreachable");
-                            }
                             AcceptHandshake(result) => {
                                 if !result {
                                     error!("Could not perform handshake!");
@@ -320,9 +311,6 @@ impl Handler<OutMessage> for OutConnection {
                     PeersResponse(peers) => {
                         self.write.write(OutMessage::Response(PeersResponse(peers)))
                     }
-                    MessageResponse(_, _) => {
-                        unreachable!()
-                    }
                     AcceptHandshake(result) => {
                         if !result {
                             error!("Could not perform handshake!");
@@ -371,30 +359,4 @@ impl Eq for OutConnection {}
 
 impl WriteHandler<std::io::Error> for InConnection {}
 
-
 impl WriteHandler<std::io::Error> for OutConnection {}
-
-// // impl Handler<ActorRequest> for OutgoingConnection {
-// //     type Result = ();
-// //
-// //     fn handle(&mut self, msg: ActorRequest, ctx: &mut Self::Context) -> Self::Result {
-// //         debug!("Handler<ActorRequest> for OutgoingConnection");
-// //         match msg {
-// //             ActorRequest::Message(msg, sock_addr) => {
-// //                 self.write.write(OutMessage::Request(RandomMessagePayload(msg, sock_addr)))
-// //             }
-// //             ActorRequest::PeersRequest => {
-// //                 self.write.write(OutMessage::Request(PeersRequest))
-// //             }
-// //         }
-// //     }
-// // }
-// //
-// // impl Handler<ActorResponse> for OutgoingConnection {
-// //     type Result = ();
-// //
-// //     fn handle(&mut self, msg: ActorResponse, ctx: &mut Self::Context) -> Self::Result {
-// //         todo!()
-// //     }
-// // }
-//

@@ -2,6 +2,11 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use actix::Message;
 
+/*
+    Two types of messages are needed as
+    there are two types of connections
+ */
+
 #[derive(Debug, Message)]
 #[rtype(result = "()")]
 pub enum OutMessage {
@@ -21,7 +26,7 @@ pub enum InMessage {
 pub enum Response {
     PeersResponse(HashSet<SocketAddr>),
     // TODO
-    MessageResponse(String, SocketAddr),
+    // MessageResponse(String, SocketAddr),
     /// Result of handshake is socket address of peer answering to request
     AcceptHandshake(bool),
 }
