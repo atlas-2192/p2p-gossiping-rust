@@ -1,10 +1,11 @@
 use std::collections::HashSet;
+use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::io::{ErrorKind, Read};
 use std::net::SocketAddr;
 use std::time::Duration;
-use actix::{Actor, ActorContext, ActorFutureExt, ActorTryFutureExt, Addr, AsyncContext, Context, ContextFutureSpawner, Handler, StreamHandler, WrapFuture};
+use actix::{Actor, ActorContext, ActorFutureExt, ActorStreamExt, ActorTryFutureExt, Addr, AsyncContext, Context, ContextFutureSpawner, Handler, StreamHandler, WrapFuture};
 use actix::io::{FramedWrite, WriteHandler};
 use byteorder::BigEndian;
 use bytes::buf::{Reader, Writer};
@@ -21,7 +22,7 @@ use crate::message::Request::{MessageRequest, PeersRequest, TryHandshake};
 use crate::message::Response::{AcceptHandshake, PeersResponse};
 
 
-use crate::peer::{AddPeers, AddOutConnection, GetPeers, Peer, AddConnectedPeer, AddPeer};
+use crate::peer::{AddPeers, AddOutConnection, GetPeers, Peer, AddConnectedPeer, AddPeer, SendMessages};
 
 /// Connection initiated by remote peer
 pub struct InConnection {
@@ -31,14 +32,28 @@ pub struct InConnection {
     peer_actor: Addr<Peer>,
     /// stream to write messages to remote peer
     write: FramedWrite<InMessage, WriteHalf<TcpStream>, InCodec>,
+    /// period in which messages are sent
+    period: Duration,
 }
 
 impl InConnection {
     pub fn new(
         peer_addr: SocketAddr,
-        peer: Addr<Peer>,
-        write: FramedWrite<InMessage, WriteHalf<TcpStream>, InCodec>) -> Self {
-        Self { peer_addr, peer_actor: peer, write }
+        peer_actor: Addr<Peer>,
+        write: FramedWrite<InMessage, WriteHalf<TcpStream>, InCodec>,
+        period: Duration) -> Self {
+        Self {
+            peer_addr,
+            peer_actor,
+            write,
+            period
+        }
+    }
+}
+
+impl Display for InConnection {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(InConnection: {})", self.peer_addr)
     }
 }
 
@@ -48,8 +63,11 @@ impl Actor for InConnection {
     // Notify peer actor about creation of new connection actor
     fn started(&mut self, ctx: &mut Self::Context) {
         let actor_addr = ctx.address();
-        let socket_addr = self.peer_addr;
-        let _ = self.peer_actor.try_send(crate::peer::AddInConnection(actor_addr, socket_addr));
+        let _ = self.peer_actor.try_send(crate::peer::AddInConnection(actor_addr));
+    }
+
+    fn stopped(&mut self, ctx: &mut Self::Context) {
+        info!("Connection with [{}] has lost", self.peer_addr)
     }
 }
 
@@ -57,7 +75,7 @@ impl Actor for InConnection {
 impl Handler<InMessage> for InConnection {
     type Result = ();
 
-    fn handle(&mut self, msg: InMessage, ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: InMessage, _ctx: &mut Self::Context) -> Self::Result {
         debug!("Handler<InMessage> for IncomingConnection");
         match msg {
             InMessage::Request(req) => {
@@ -122,11 +140,13 @@ impl StreamHandler<Result<InMessage, io::Error>> for InConnection {
                                 // add sender to peers list in successful case
                                 if validated {
                                     info!("Handshake validated");
-                                    self.peer_actor.try_send(AddPeer(sender));
+                                    let _ = self.peer_actor.try_send(AddPeer(sender));
                                 } else {
                                     info!{"Handshake failed"}
                                 }
                                 self.write.write(InMessage::Response(AcceptHandshake(validated)));
+                                // start sending messages to connected peer
+                                let _ = self.peer_actor.try_send(SendMessages(gen_rnd_msg()));
                             }
                         }
                     }
@@ -136,7 +156,7 @@ impl StreamHandler<Result<InMessage, io::Error>> for InConnection {
                             PeersResponse(mut peers) => {
                                 // Add the rest of peers, except already connected
                                 peers.remove(&self.peer_addr);
-                                self.peer_actor.send(AddPeers(peers))
+                                let _ = self.peer_actor.send(AddPeers(peers))
                                     .into_actor(self)
                                     .then(|res, _actor, ctx| {
                                         if res.is_err() {
@@ -146,19 +166,9 @@ impl StreamHandler<Result<InMessage, io::Error>> for InConnection {
                                         actix::fut::ready(())
                                     })
                                     .wait(ctx);
-
-                                let actor = ctx.address();
-                                let sender = self.peer_addr;
-                                let period = Duration::from_secs(3);
-                                ctx.spawn(async move {
-                                    let msg = gen_rnd_msg();
-                                    loop {
-                                        tokio::time::sleep(period).await;
-                                        let connected_peers =
-                                        actor.try_send(InMessage::Request(MessageRequest(msg.clone(), sender)));
-                                    }
-                                }
-                                    .into_actor(self));
+                                // start sending messages with specified [`period`]
+                                let msg = gen_rnd_msg();
+                                let _ = self.peer_actor.try_send(SendMessages(msg));
                             }
                             AcceptHandshake(result) => {
                                 if !result {
@@ -193,20 +203,30 @@ pub struct OutConnection {
     peer_actor: Addr<Peer>,
     /// stream to write messages to remote peer
     write: FramedWrite<OutMessage, WriteHalf<TcpStream>, OutCodec>,
+    /// period in which messages are sent
+    period: Duration,
 }
 
 impl OutConnection {
     pub fn new(
         peer_addr: SocketAddr,
         remote_peer_addr: SocketAddr,
-        peer: Addr<Peer>,
-        write: FramedWrite<OutMessage, WriteHalf<TcpStream>, OutCodec>) -> Self {
+        peer_actor: Addr<Peer>,
+        write: FramedWrite<OutMessage, WriteHalf<TcpStream>, OutCodec>,
+        period: Duration) -> Self {
         Self {
             peer_addr,
             remote_peer_addr,
-            peer_actor:
-            peer, write
+            peer_actor,
+            write,
+            period
         }
+    }
+}
+
+impl Display for OutConnection {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(OutConnection: peer_addr: {}, remote_peer_addr: {})", self.peer_addr, self.remote_peer_addr)
     }
 }
 
@@ -216,8 +236,11 @@ impl Actor for OutConnection {
     // Notify peer actor about creation of new connection actor
     fn started(&mut self, ctx: &mut Self::Context) {
         let addr = ctx.address();
-        let socket_addr = self.remote_peer_addr;
-        let _ = self.peer_actor.send(AddOutConnection(addr, socket_addr));
+        let _ = self.peer_actor.try_send(AddOutConnection(addr));
+    }
+
+    fn stopped(&mut self, _ctx: &mut Self::Context) {
+        info!("Connection with [{}] has lost", self.remote_peer_addr)
     }
 }
 
@@ -277,18 +300,9 @@ impl StreamHandler<Result<OutMessage, io::Error>> for OutConnection {
                                         actix::fut::ready(())
                                     })
                                     .wait(ctx);
-
-                                let actor = ctx.address();
-                                let sender = self.peer_addr;
-                                let period = Duration::from_secs(3);
-                                ctx.spawn(async move {
-                                    let msg = gen_rnd_msg();
-                                    loop {
-                                        tokio::time::sleep(period).await;
-                                        actor.try_send(OutMessage::Request(MessageRequest(msg.clone(), sender)));
-                                    }
-                                }
-                                    .into_actor(self));
+                                // start sending messages with specified [`period`]
+                                let msg = gen_rnd_msg();
+                                let _ = self.peer_actor.try_send(SendMessages(msg));
                             }
                             AcceptHandshake(result) => {
                                 if !result {
@@ -317,7 +331,7 @@ impl StreamHandler<Result<OutMessage, io::Error>> for OutConnection {
 impl Handler<OutMessage> for OutConnection {
     type Result = ();
 
-    fn handle(&mut self, msg: OutMessage, ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: OutMessage, _ctx: &mut Self::Context) -> Self::Result {
         debug!("Handler<OutMessage> for OutgoingConnection");
         match msg {
             OutMessage::Request(req) => {

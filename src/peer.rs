@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::io::Error;
@@ -19,8 +20,8 @@ use tracing::field::debug;
 use tracing::log::error;
 use crate::codec::{InCodec, OutCodec};
 use crate::connection::{InConnection, OutConnection};
-use crate::message::OutMessage;
-use crate::message::Request::TryHandshake;
+use crate::message::{InMessage, OutMessage};
+use crate::message::Request::{MessageRequest, TryHandshake};
 
 
 pub struct Peer {
@@ -61,6 +62,7 @@ impl Peer {
     // set up peer to start listen incoming connections
     fn start_listening(&self, peer_addr: Addr<Peer>) {
         let addr = self.socket_addr.clone();
+        let period = self.period;
         spawn(async move {
             let listener = TcpListener::bind(addr).await.unwrap();
             while let Ok((stream, addr)) = listener.accept().await {
@@ -71,7 +73,7 @@ impl Peer {
                     // reading from remote peer connection
                     InConnection::add_stream(FramedRead::new(r, InCodec), ctx);
                     // writing to remote peer connection
-                    InConnection::new(addr, peer, FramedWrite::new(w, InCodec, ctx))
+                    InConnection::new(addr, peer, FramedWrite::new(w, InCodec, ctx), period)
                 });
             }
         });
@@ -86,20 +88,21 @@ impl Peer {
 impl Actor for Peer {
     type Context = Context<Self>;
 
-    fn started(&mut self, peer_ctx: &mut Self::Context) {
+    fn started(&mut self, ctx: &mut Self::Context) {
         // Peer is the first in the network
         if self.connect_to.is_none() {
             info!("Peer has started on [{}]. Waiting for incoming connections", self.socket_addr);
-            self.start_listening(peer_ctx.address());
+            self.start_listening(ctx.address());
             return;
         }
         // Trying to connect initial peer
-        self.start_listening(peer_ctx.address());
+        self.start_listening(ctx.address());
+        let period = self.period;
         let connect_to = self.connect_to.unwrap();
-        let peer_ctx_address = peer_ctx.address().clone();
+        let peer_ctx_address = ctx.address().clone();
         info!("Peer has started on [{}]. Trying to connect [{connect_to}]", self.socket_addr);
 
-        peer_ctx.spawn(async move {
+        ctx.spawn(async move {
             TcpStream::connect(connect_to).await
         }
             .into_actor(self)
@@ -117,7 +120,8 @@ impl Actor for Peer {
                         actor.socket_addr,
                         remote_peer_addr,
                         peer_ctx_address,
-                        FramedWrite::new(w, OutCodec, ctx))
+                        FramedWrite::new(w, OutCodec, ctx),
+                        period)
                 });
                 // try perform handshake with remote peer
                 let _ = initial_peer.try_send(
@@ -129,49 +133,33 @@ impl Actor for Peer {
                 );
             })
         );
-
-        // start sending messages with specified [`period`]
-        let period = self.period.clone();
-        // TODO check if removed peers are being removed while loop processing
-        // + is it ok to clone() sender in Addr<> ?
-        //let peers = self.connections.clone();
-        let socket_addr = self.socket_addr.clone();
-        // peer_ctx.spawn(async {
-        //     let msg = gen_rnd_msg();
-        //     loop {
-        //         //tokio::time::sleep(period).await;
-        //         // peers.scan(|conn| {
-        //         //     let _ = conn.peer.send(Request::RandomMessage(Message{msg: msg.clone(), from: socket_addr }));
-        //         // });
-        //     }
-        // }
-        //     .into_actor(self));
     }
 }
 
 #[derive(Debug, Message)]
 #[rtype(result = "()")]
-pub(crate) struct AddInConnection(pub Addr<InConnection>, pub SocketAddr);
+pub(crate) struct AddInConnection(pub Addr<InConnection>);
 
 impl Handler<AddInConnection> for Peer {
     type Result = ();
 
     fn handle(&mut self, msg: AddInConnection, _ctx: &mut Self::Context) -> Self::Result {
         let _ = self.connections.insert(Connection::In(msg.0));
+        debug!("in connection has been added to connections");
         //let _ = self.peers.insert(msg.1);
     }
 }
 
 #[derive(Debug, Message)]
 #[rtype(result = "()")]
-pub(crate) struct AddOutConnection(pub Addr<OutConnection>, pub SocketAddr);
+pub(crate) struct AddOutConnection(pub Addr<OutConnection>);
 
 impl Handler<AddOutConnection> for Peer {
     type Result = ();
 
     fn handle(&mut self, msg: AddOutConnection, _ctx: &mut Self::Context) -> Self::Result {
         let _ = self.connections.insert(Connection::Out(msg.0));
-        let _ = self.peers.insert(msg.1);
+        debug!("out connection has been added to connections");
     }
 }
 
@@ -190,7 +178,7 @@ impl Handler<AddPeer> for Peer {
 
 #[derive(Debug, Message)]
 #[rtype(result = "()")]
-pub struct AddPeers(pub(crate) HashSet<SocketAddr>);
+pub struct AddPeers(pub HashSet<SocketAddr>);
 
 impl Handler<AddPeers> for Peer {
     type Result = ();
@@ -242,6 +230,7 @@ impl Handler<ConnectPeers> for Peer {
 
         let peers_to_connect = Arc::new(peers_to_connect);
         let peer_addr = self.socket_addr.clone();
+        let period = self.period;
 
         peer_ctx.spawn(async move {
             // TODO define retry count
@@ -256,7 +245,8 @@ impl Handler<ConnectPeers> for Peer {
                             peer_addr,
                             *peer,
                             peer_actor.clone(),
-                            FramedWrite::new(w, OutCodec, ctx))
+                            FramedWrite::new(w, OutCodec, ctx),
+                            period)
                     });
                 } else {
                     warn!("couldn't establish connection with peer: {peer}");
@@ -280,32 +270,43 @@ impl Handler<ConnectPeers> for Peer {
 #[rtype(result = "HashSet<SocketAddr>")]
 pub(crate) struct GetPeers;
 
-#[derive(Debug, Message)]
-#[rtype(result = "HashSet<SocketAddr>")]
-pub(crate) struct PeersResponse(HashSet<SocketAddr>);
-
 impl Handler<GetPeers> for Peer {
     type Result = MessageResult<GetPeers>;
 
     fn handle(&mut self, _msg: GetPeers, _ctx: &mut Self::Context) -> Self::Result {
         let mut peers = self.peers.clone();
-        peers.insert(self.socket_addr);
+        //peers.insert(self.socket_addr);
         MessageResult(peers)
     }
 }
-//
-// #[derive(Message)]
-// #[rtype(result = "()")]
-// struct AddStreamToConnection(IncomingConnection);
-//
-// impl Handler<AddStreamToConnection> for IncomingConnection {
-//     type Result = ();
-//
-//     fn handle(&mut self, msg: AddStreamToConnection, ctx: &mut Self::Context) -> Self::Result {
-//         let conn = msg.0;
-//         conn.start();
-//     }
-// }
+
+/// send random messages to connected peers
+#[derive(Debug, Message)]
+#[rtype(result = "()")]
+pub struct SendMessages(pub String);
+
+impl Handler<SendMessages> for Peer {
+    type Result = ();
+
+    fn handle(&mut self, msgs: SendMessages, ctx: &mut Self::Context) -> Self::Result {
+        // start sending messages with specified [`period`]
+        warn!("peer has started sending messages : [{}]", &msgs.0);
+        warn!("peers size: {}", self.peers.len());
+        warn!("connections size: {}", self.connections.len());
+        ctx.run_interval(self.period, move |actor, _ctx| {
+            for conn in actor.connections.iter() {
+                match conn {
+                    Connection::In(c) => {
+                        let _ = c.try_send(InMessage::Request(MessageRequest(msgs.0.clone(), actor.socket_addr)));
+                    }
+                    Connection::Out(c) => {
+                        let _ = c.try_send(OutMessage::Request(MessageRequest(msgs.0.clone(), actor.socket_addr)));
+                    }
+                }
+            }
+        });
+    }
+}
 
 fn gen_rnd_msg() -> String {
     use random_word::Lang;
