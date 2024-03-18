@@ -1,3 +1,4 @@
+#![feature(buf_read_has_data_left)]
 mod peer;
 mod codec;
 mod connection;
@@ -10,11 +11,25 @@ use std::time::Duration;
 use clap::Parser;
 use tracing::{error, Level};
 use actix::prelude::*;
+use time::format_description;
+use time::macros::format_description;
+use tracing_subscriber::fmt;
 use crate::peer::Peer;
 
 
 fn main() -> io::Result<()> {
-    let subscriber = tracing_subscriber::fmt().with_max_level(Level::DEBUG).finish();
+    format_description!("[hour]:[minute]:[second]");
+    let timer = format_description::parse("[hour]:[minute]:[second]").unwrap();
+    let time_offset =
+        time::UtcOffset::current_local_offset().unwrap_or_else(|_| time::UtcOffset::UTC);
+    let timer = fmt::time::OffsetTime::new(time_offset, timer);
+
+    let subscriber = tracing_subscriber::fmt()
+        .with_timer(timer)
+        .with_target(false)
+        .with_max_level(Level::DEBUG)
+        .finish();
+
     tracing::subscriber::set_global_default(subscriber).expect("Could not set tracing subscriber");
     let args = Args::parse();
     let period =  args.period;
@@ -58,10 +73,4 @@ struct Args {
     /// The 'connect_to' arg is None if this peer is first in the network
     #[arg(long)]
     connect: Option<u32>,
-}
-
-fn gen_rnd_msg() -> String {
-    use random_word::Lang;
-    let msg = random_word::gen(Lang::En);
-    String::from(msg)
 }
