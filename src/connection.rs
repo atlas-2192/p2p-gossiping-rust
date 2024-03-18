@@ -6,7 +6,7 @@ use actix::{Actor, ActorContext, ActorFutureExt, Addr, AsyncContext, Context, Co
 use actix::io::{FramedWrite, WriteHandler};
 use tokio::io::WriteHalf;
 use tokio::net::TcpStream;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use tracing::log::error;
 use crate::codec::{OutCodec, InCodec};
 use crate::message::{InMessage, OutMessage};
@@ -14,13 +14,13 @@ use crate::message::Request::{MessageRequest, PeersRequest, TryHandshake};
 use crate::message::Response::{AcceptHandshake, PeersResponse};
 
 
-use crate::peer::{AddPeers, AddOutConnection, GetPeers, Peer, AddPeer, SendMessages};
+use crate::peer::{AddPeers, AddOutConnection, GetConnectedPeers, Peer, AddConnectedPeer, SendMessages, AddInConnection};
 
 /// Connection initiated by remote peer
 pub struct InConnection {
     /// remote peer [`SocketAddr`].
     /// Actual address is arbitrary address chosen by OS during the TCP connection process.
-    /// We are substituting it by peer listening address for clarification
+    /// Substituted by peer listening address for clarification purpose.
     pub remote_peer_addr: SocketAddr,
     /// remote peer [`Actor`] address
     peer_actor: Addr<Peer>,
@@ -41,19 +41,13 @@ impl InConnection {
     }
 }
 
-impl Display for InConnection {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "(InConnection: {})", self.remote_peer_addr)
-    }
-}
-
 impl Actor for InConnection {
     type Context = Context<Self>;
 
     // Notify peer actor about creation of new connection actor
     fn started(&mut self, ctx: &mut Self::Context) {
         let actor_addr = ctx.address();
-        let _ = self.peer_actor.try_send(crate::peer::AddInConnection(actor_addr));
+        let _ = self.peer_actor.try_send(AddInConnection(actor_addr, self.remote_peer_addr));
     }
 
     fn stopped(&mut self, _ctx: &mut Self::Context) {
@@ -66,7 +60,6 @@ impl Handler<InMessage> for InConnection {
     type Result = ();
 
     fn handle(&mut self, msg: InMessage, _ctx: &mut Self::Context) -> Self::Result {
-        //debug!("Handler<InMessage> for IncomingConnection");
         match msg {
             InMessage::Request(req) => {
                 match req {
@@ -75,11 +68,11 @@ impl Handler<InMessage> for InConnection {
                         self.write.write(InMessage::Request(MessageRequest(msg, addr)))
                     }
                     PeersRequest => {
+                        // send request of all connected peers
                         self.write.write(InMessage::Request(PeersRequest));
                     }
                     TryHandshake {token, sender, receiver} => {
                         // Try to perform handshake
-                        debug!("InConnection sending handshake request from [{receiver}] to [{sender}]");
                         self.write.write(InMessage::Request(TryHandshake{ token, sender, receiver}));
                     }
                 }
@@ -111,7 +104,7 @@ impl StreamHandler<Result<InMessage, io::Error>> for InConnection {
                             }
                             PeersRequest => {
                                 self.peer_actor
-                                    .send(GetPeers)
+                                    .send(GetConnectedPeers)
                                     .into_actor(self)
                                     .then(|res, actor, _ctx| {
                                         match res {
@@ -129,8 +122,7 @@ impl StreamHandler<Result<InMessage, io::Error>> for InConnection {
                                 let validated = validate_handshake(&token);
                                 // add sender to peers list in successful case
                                 if validated {
-                                    // info!("Handshake validated. Peer [{sender}] connected");
-                                    let _ = self.peer_actor.try_send(AddPeer(sender));
+                                    let _ = self.peer_actor.try_send(AddConnectedPeer(sender));
                                 } else {
                                     error!{"Handshake failed"}
                                 }
@@ -144,9 +136,10 @@ impl StreamHandler<Result<InMessage, io::Error>> for InConnection {
                         debug!("in connection : got response from peer");
                         match resp {
                             PeersResponse(mut peers) => {
-                                // Add the rest of peers, except already connected
+                                // debug!("StreamHandler for InConnection PeersResponse {peers:?}");
                                 peers.remove(&self.remote_peer_addr);
-                                let _ = self.peer_actor.send(AddPeers(peers))
+                                // debug!("&self.remote_peer_addr {}", &self.remote_peer_addr);
+                                self.peer_actor.send(AddPeers(peers))
                                     .into_actor(self)
                                     .then(|res, _actor, ctx| {
                                         if res.is_err() {
@@ -160,11 +153,11 @@ impl StreamHandler<Result<InMessage, io::Error>> for InConnection {
                             AcceptHandshake(result) => {
                                 if !result {
                                     error!("Could not perform handshake!");
-                                    // TODO check
                                     ctx.stop();
                                 } else {
+                                    // Add connected peer to peer's set
+                                    let _ = self.peer_actor.try_send(AddConnectedPeer(self.remote_peer_addr));
                                     // request all the other peers
-                                    debug!("Handshake accepted successfully");
                                     let _ = ctx.address().try_send(InMessage::Request(PeersRequest));
                                 }
                             }
@@ -208,19 +201,13 @@ impl OutConnection {
     }
 }
 
-impl Display for OutConnection {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "(OutConnection: peer_addr: {}, remote_peer_addr: {})", self.peer_addr, self.remote_peer_addr)
-    }
-}
-
 impl Actor for OutConnection {
     type Context = Context<Self>;
 
     // Notify peer actor about creation of new connection actor
     fn started(&mut self, ctx: &mut Self::Context) {
         let addr = ctx.address();
-        let _ = self.peer_actor.try_send(AddOutConnection(addr));
+        let _ = self.peer_actor.try_send(AddOutConnection(addr, self.remote_peer_addr));
     }
 
     fn stopped(&mut self, _ctx: &mut Self::Context) {
@@ -241,7 +228,7 @@ impl StreamHandler<Result<OutMessage, io::Error>> for OutConnection {
                             }
                             PeersRequest => {
                                 self.peer_actor
-                                    .send(GetPeers)
+                                    .send(GetConnectedPeers)
                                     .into_actor(self)
                                     .then(|res, actor, _ctx| {
                                         match res {
@@ -259,8 +246,7 @@ impl StreamHandler<Result<OutMessage, io::Error>> for OutConnection {
                                 let validated = validate_handshake(&token);
                                 // add sender to peers list in successful case
                                 if validated {
-                                    // info!("Handshake validated. Peer [{sender}] connected");
-                                    let _ = self.peer_actor.try_send(AddPeer(sender));
+                                    let _ = self.peer_actor.try_send(AddConnectedPeer(sender));
                                 } else {
                                     error!{"Handshake failed"}
                                 }
@@ -272,8 +258,7 @@ impl StreamHandler<Result<OutMessage, io::Error>> for OutConnection {
                         //debug!("out connection : got response from peer");
                         match resp {
                             PeersResponse(mut peers) => {
-                                // Add the rest of peers, except already connected
-                                peers.remove(&self.peer_addr);
+                                let removed = peers.remove(&self.remote_peer_addr);
                                 self.peer_actor.send(AddPeers(peers))
                                     .into_actor(self)
                                     .then(|res, _actor, ctx| {
@@ -293,7 +278,7 @@ impl StreamHandler<Result<OutMessage, io::Error>> for OutConnection {
                                     // TODO check
                                     ctx.stop();
                                 } else {
-                                    // debug!("OutConnection handshake accepted successfully");
+                                    let _ = self.peer_actor.try_send(AddConnectedPeer(self.remote_peer_addr));
                                     // request all the other peers
                                     let _ = ctx.address().try_send(OutMessage::Request(PeersRequest));
                                 }
@@ -335,6 +320,7 @@ impl Handler<OutMessage> for OutConnection {
             OutMessage::Response(resp) => {
                 match resp {
                     PeersResponse(peers) => {
+                        debug!("OutMessage::Response(resp) PeersResponse(peers) : {peers:?}");
                         self.write.write(OutMessage::Response(PeersResponse(peers)))
                     }
                     AcceptHandshake(result) => {

@@ -4,12 +4,12 @@ mod codec;
 mod connection;
 pub(crate) mod message;
 
-use std::io;
+use std::{io, process};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
 use clap::Parser;
-use tracing::{error, info, Level};
+use tracing::{error, Level};
 use actix::prelude::*;
 use time::format_description;
 use time::macros::format_description;
@@ -21,7 +21,7 @@ fn main() -> io::Result<()> {
     format_description!("[hour]:[minute]:[second]");
     let timer = format_description::parse("[hour]:[minute]:[second]").unwrap();
     let time_offset =
-        time::UtcOffset::current_local_offset().unwrap_or_else(|_| time::UtcOffset::UTC);
+        time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
     let timer = fmt::time::OffsetTime::new(time_offset, timer);
 
     let subscriber = tracing_subscriber::fmt()
@@ -46,6 +46,7 @@ fn main() -> io::Result<()> {
                     Peer::new(port, Duration::from_secs(period), Some(addr)).start();
                 } else {
                     error!("couldn't parse initial peer socket addr");
+                    process::exit(1);
                 }
             },
             None => {
