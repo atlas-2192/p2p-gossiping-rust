@@ -115,7 +115,7 @@ pub fn deserialize_data<'a, DATA: serde::de::Deserialize<'a>>(bytes:  &'a [u8])
     -> Result<DATA, io::Error> {
     let data = DefaultOptions::new()
         .with_varint_encoding()
-        .deserialize::<DATA>(&bytes[..]);
+        .deserialize::<DATA>(bytes);
     if let Ok(data) = data {
         Ok(data)
     } else {

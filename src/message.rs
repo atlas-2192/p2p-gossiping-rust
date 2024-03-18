@@ -27,6 +27,7 @@ pub enum InMessage {
 
 #[derive(Deserialize, Serialize, Debug, Message)]
 #[rtype(result = "()")]
+#[allow(clippy::enum_variant_names)]
 pub enum Request {
     /// (random message, sender)
     MessageRequest(String, SocketAddr),

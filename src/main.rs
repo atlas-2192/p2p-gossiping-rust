@@ -4,7 +4,7 @@ mod codec;
 mod connection;
 pub(crate) mod message;
 
-use std::io;
+use std::{io, process};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
@@ -21,7 +21,7 @@ fn main() -> io::Result<()> {
     format_description!("[hour]:[minute]:[second]");
     let timer = format_description::parse("[hour]:[minute]:[second]").unwrap();
     let time_offset =
-        time::UtcOffset::current_local_offset().unwrap_or_else(|_| time::UtcOffset::UTC);
+        time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
     let timer = fmt::time::OffsetTime::new(time_offset, timer);
 
     let subscriber = tracing_subscriber::fmt()
@@ -41,13 +41,12 @@ fn main() -> io::Result<()> {
     sys.block_on( async {
         match connect {
             Some(connect_to) => {
-                let socket_addr = format!("127.0.0.1:{}", connect_to);
-                let socket_addr = SocketAddr::from_str(&socket_addr);
+                let socket_addr = SocketAddr::from_str(&connect_to);
                 if let Ok(addr) = socket_addr {
                     Peer::new(port, Duration::from_secs(period), Some(addr)).start();
                 } else {
-                    // TODO exit
-                    error!("wrong peer addr");
+                    error!("couldn't parse initial peer socket addr");
+                    process::exit(1);
                 }
             },
             None => {
@@ -72,5 +71,5 @@ struct Args {
     port: u32,
     /// The 'connect_to' arg is None if this peer is first in the network
     #[arg(long)]
-    connect: Option<u32>,
+    connect: Option<String>,
 }
