@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
 use clap::Parser;
-use tracing::{error, Level};
+use tracing::{error, info, Level};
 use actix::prelude::*;
 use time::format_description;
 use time::macros::format_description;
@@ -41,13 +41,11 @@ fn main() -> io::Result<()> {
     sys.block_on( async {
         match connect {
             Some(connect_to) => {
-                let socket_addr = format!("127.0.0.1:{}", connect_to);
-                let socket_addr = SocketAddr::from_str(&socket_addr);
+                let socket_addr = SocketAddr::from_str(&connect_to);
                 if let Ok(addr) = socket_addr {
                     Peer::new(port, Duration::from_secs(period), Some(addr)).start();
                 } else {
-                    // TODO exit
-                    error!("wrong peer addr");
+                    error!("couldn't parse initial peer socket addr");
                 }
             },
             None => {
@@ -72,5 +70,5 @@ struct Args {
     port: u32,
     /// The 'connect_to' arg is None if this peer is first in the network
     #[arg(long)]
-    connect: Option<u32>,
+    connect: Option<String>,
 }

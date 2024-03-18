@@ -114,31 +114,32 @@ impl Actor for Peer {
             }
         }
             .into_actor(self)
-            .map_err(move |e, _act, ctx| {
-                error!("Couldn't establish connection with peer: {connect_to}, error {e}");
-                ctx.stop();
-            })
-            .map(move |stream, actor, _ctx| {
-                let stream = stream.unwrap();
-                let remote_peer_addr = stream.peer_addr().unwrap();
-                let (r, w) = split(stream);
-                let initial_peer = OutConnection::create(|ctx| {
-                    OutConnection::add_stream(FramedRead::new(r, OutCodec), ctx);
-                    OutConnection::new(
-                        actor.socket_addr,
-                        remote_peer_addr,
-                        peer_ctx_address,
-                        FramedWrite::new(w, OutCodec, ctx),
-                    )
-                });
-                // try perform handshake with remote peer
-                let _ = initial_peer.try_send(
-                    OutMessage::Request(
-                        TryHandshake{
-                            token: b"secret".to_vec(),
-                            sender: actor.socket_addr,
-                            receiver: connect_to})
-                );
+            .map(move |stream, actor, ctx| {
+                if stream.is_err() {
+                    error!("could not connect to initial peer");
+                    ctx.stop();
+                } else {
+                    let stream = stream.unwrap();
+                    let remote_peer_addr = stream.peer_addr().unwrap();
+                    let (r, w) = split(stream);
+                    let initial_peer = OutConnection::create(|ctx| {
+                        OutConnection::add_stream(FramedRead::new(r, OutCodec), ctx);
+                        OutConnection::new(
+                            actor.socket_addr,
+                            remote_peer_addr,
+                            peer_ctx_address,
+                            FramedWrite::new(w, OutCodec, ctx),
+                        )
+                    });
+                    // try perform handshake with remote peer
+                    let _ = initial_peer.try_send(
+                        OutMessage::Request(
+                            TryHandshake{
+                                token: b"secret".to_vec(),
+                                sender: actor.socket_addr,
+                                receiver: connect_to})
+                    );
+                }
             })
         );
     }
@@ -282,9 +283,6 @@ impl Handler<SendMessages> for Peer {
     fn handle(&mut self, _msg: SendMessages, ctx: &mut Self::Context) -> Self::Result {
         // start sending messages with specified [`period`]
         let msg = self.message.clone();
-        warn!("peer has started sending messages : [{}]", msg);
-        warn!("peers size: {}", self.peers.len());
-        warn!("connections size: {}", self.connections.len());
         ctx.run_interval(self.period, move |actor, _ctx| {
             for conn in actor.connections.iter() {
                 match conn {
