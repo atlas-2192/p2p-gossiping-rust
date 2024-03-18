@@ -227,7 +227,6 @@ impl Handler<ConnectPeers> for Peer {
         let peer_addr = self.socket_addr;
 
         ctx.wait(async move {
-            // TODO define retry count
             let mut errors = HashSet::new();
             for peer in peers_to_connect.iter() {
                 let stream = TcpStream::connect(peer).await;
@@ -236,7 +235,7 @@ impl Handler<ConnectPeers> for Peer {
                         .map_err(|e| {
                             error!["error: {e}"];
                         });
-                    let conn = OutConnection::create(|ctx| {
+                    OutConnection::create(|ctx| {
                         let (r, w) = split(stream);
                         OutConnection::add_stream(FramedRead::new(r, OutCodec), ctx);
                         OutConnection::new(
@@ -246,11 +245,6 @@ impl Handler<ConnectPeers> for Peer {
                             FramedWrite::new(w, OutCodec, ctx)
                         )
                     });
-                    let _ = conn.try_send(OutMessage::Request(TryHandshake {
-                        token: Vec::from(b"secret"),
-                        sender: peer_addr,
-                        receiver: *peer,
-                    }));
                 } else {
                     warn!("couldn't establish connection with peer: {peer}");
                     errors.insert(*peer);
