@@ -1,5 +1,3 @@
-
-/// Messages being exchanged between actors and sent across the network
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use actix::Message;
@@ -16,19 +14,17 @@ pub enum OutMessage {
     Response(Response),
 }
 
+/*
+   Messages being exchanged between actors and sent across the network
+ */
+
 #[derive(Deserialize, Serialize, Debug, Message)]
 #[rtype(result = "()")]
 pub enum InMessage {
     Request(Request),
     Response(Response),
 }
-#[derive(Deserialize, Serialize, Debug, Message)]
-#[rtype(result = "()")]
-pub enum Response {
-    PeersResponse(HashSet<SocketAddr>),
-    /// Result of handshake is socket address of peer answering to request
-    AcceptHandshake(bool),
-}
+
 #[derive(Deserialize, Serialize, Debug, Message)]
 #[rtype(result = "()")]
 pub enum Request {
@@ -46,4 +42,13 @@ pub enum Request {
         /// send request to
         receiver: SocketAddr
     },
+}
+
+#[derive(Deserialize, Serialize, Debug, Message)]
+#[rtype(result = "()")]
+pub enum Response {
+    /// Response containing peers
+    PeersResponse(HashSet<SocketAddr>),
+    /// Result of handshake
+    AcceptHandshake(bool),
 }

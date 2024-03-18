@@ -1,30 +1,11 @@
 use std::io;
 use std::io::{ErrorKind};
 
-use actix::prelude::*;
 use byteorder::{BigEndian, ByteOrder};
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{BufMut, BytesMut};
 use actix_codec::{Decoder, Encoder};
 use bincode::{DefaultOptions, Options};
-use tracing::{debug, error, info, warn};
 use crate::message::{InMessage, OutMessage};
-
-
-/// Message [`actix::handler::Message`] flow:
-///
-/// Peer1 [`crate::peer::Peer`] actor, request [`ActorRequest`]
-///         ->
-/// Peer1 [`crate::connection::OutConnection`] actor, request [`OutgoingNetworkRequest`]
-///         ->
-/// Peer2 [`crate::connection::InConnection`] actor, request [`InMessage`]
-///         ->
-/// Peer2 [`crate::peer::Peer`] actor, response [`ActorRequest`]
-///         ->
-/// Peer2 [`crate::connection::OutConnection`] actor, response [`OutgoingActorResponse`]
-///         ->
-/// Peer1 [`crate::connection::InConnection`] actor, response [`OutMessage`]
-///         ->
-/// Peer1 [`crate::peer::Peer`] actor
 
 /// Codec for [`crate::peer::OutConnection`]
 pub struct OutCodec;
@@ -81,7 +62,6 @@ impl Decoder for InCodec {
 impl Encoder<InMessage> for InCodec {
     type Error = io::Error;
 
-    /// Respond to incoming connection
     fn encode(&mut self, item: InMessage, dst: &mut BytesMut) -> Result<(), Self::Error> {
         let msg = serialize_data(&item).unwrap();
         let msg_ref: &[u8] = msg.as_ref();
@@ -97,7 +77,6 @@ impl Encoder<InMessage> for InCodec {
 impl Encoder<OutMessage> for InCodec {
     type Error = io::Error;
 
-    /// Respond to incoming connection
     fn encode(&mut self, item: OutMessage, dst: &mut BytesMut) -> Result<(), Self::Error> {
         let msg = serialize_data(&item).unwrap();
         let msg_ref: &[u8] = msg.as_ref();
@@ -132,7 +111,7 @@ pub fn serialize_data<DATA: serde::ser::Serialize>(data: DATA) -> io::Result<Vec
         .map_err(|e| io::Error::new(ErrorKind::InvalidInput, format!("serialization error: {e}")))?)
 }
 
-fn deserialize_data<'a, DATA: serde::de::Deserialize<'a>>(bytes:  &'a [u8])
+pub fn deserialize_data<'a, DATA: serde::de::Deserialize<'a>>(bytes:  &'a [u8])
     -> Result<DATA, io::Error> {
     let data = DefaultOptions::new()
         .with_varint_encoding()
