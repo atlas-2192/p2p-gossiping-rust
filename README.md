@@ -1,4 +1,4 @@
-# Simple p2p gossiping app
+# Simple p2p gossiping app written with actix-actor framework
 
 The peer have a cli interface to start it and connect itself to the other peers. 
 Once connected, the peer starts sending a random gossip message (and printing it) to all the other peers every N seconds. 
