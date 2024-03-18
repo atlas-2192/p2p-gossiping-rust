@@ -21,6 +21,6 @@ cargo run --package p2p_gossiping_app --bin p2p_gossiping_app -- --period=5 --po
 
 cargo run --package p2p_gossiping_app --bin p2p_gossiping_app -- --period=6 --port=8081 --connect="127.0.0.1:8080"
 
-### Starting the third peer which will connect to all the peers through the first, messaging period - 7 seconds, port - 8082
+### Starting the third peer (with options) which will connect to all the peers through the first, messaging period - 7 seconds, port - 8082
 
 cargo run --package p2p_gossiping_app --bin p2p_gossiping_app -- --period=7 --port=8082 --connect="127.0.0.1:8080"
